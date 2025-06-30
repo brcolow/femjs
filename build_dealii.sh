@@ -28,13 +28,12 @@ for cmd in "${!packages[@]}"; do
     else
         echo "✅ $cmd found: $("$cmd" --version | head -n 1)"
     fi
-    echo # Add a newline for better readability between checks
 done
 
 echo "All required tools checked."
 
 # === Config ===
-DEAL_II_VERSION="v9.7.0-pre"
+DEAL_II_VERSION="master"
 KOKKOS_VERSION="4.1.00"
 INSTALL_DIR="$(pwd)/install"
 NATIVE_BUILD_DIR="native_build"
@@ -78,7 +77,7 @@ fi
 
 # === Clone deal.II ===
 if [ ! -d "dealii" ]; then
-  git clone --depth=1 --branch=master https://github.com/dealii/dealii.git
+  git clone --depth=1 -b "$DEAL_II_VERSION" https://github.com/dealii/dealii.git
 fi
 
 # === Native build to generate expand_instantiations tool ===
