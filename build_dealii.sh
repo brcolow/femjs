@@ -33,8 +33,6 @@ done
 echo "All required tools checked."
 
 # === Config ===
-DEAL_II_VERSION="master"
-KOKKOS_VERSION="4.1.00"
 INSTALL_DIR="$(pwd)/install"
 NATIVE_BUILD_DIR="native_build"
 WASM_BUILD_DIR="dealii_wasm_build"
@@ -52,13 +50,29 @@ fi
 source ./emsdk/emsdk_env.sh
 
 # === Build upstream Kokkos ===
-if [ ! -d "kokkos" ]; then
-  git clone -b "$KOKKOS_VERSION" https://github.com/kokkos/kokkos.git
+KOKKOS_REPO="https://github.com/kokkos/kokkos.git"
+KOKKOS_COMMIT="3e7dfc68cc1fb371c345ef42cb0f0d97caee8b81"  # example commit
+KOKKOS_DIR="external/kokkos"
+KOKKOS_INSTALL_DIR="$INSTALL_DIR/kokkos"
+
+if [ ! -d "$KOKKOS_DIR" ]; then
+  echo "📦 Cloning Kokkos at commit $KOKKOS_COMMIT..."
+  mkdir -p "$(dirname "$KOKKOS_DIR")"
+  git init "$KOKKOS_DIR"
+  cd "$KOKKOS_DIR"
+  git remote add origin "$KOKKOS_REPO"
+  git fetch --depth=1 origin "$KOKKOS_COMMIT"
+  git checkout "$KOKKOS_COMMIT"
+  cd -
+else
+  echo "✅ Kokkos already exists at $KOKKOS_DIR"
 fi
-mkdir -p kokkos/build && cd kokkos/build
+
+mkdir -p "$KOKKOS_DIR/build"
+cd "$KOKKOS_DIR/build"
 
 emcmake cmake .. \
-  -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR/kokkos" \
+  -DCMAKE_INSTALL_PREFIX="$KOKKOS_INSTALL_DIR" \
   -DCMAKE_CXX_STANDARD=17 \
   -DKokkos_ENABLE_SERIAL=ON \
   -DBUILD_SHARED_LIBS=OFF \
@@ -68,23 +82,93 @@ emcmake cmake .. \
 
 make -j${THREADS}
 make install
-cd ../..
+cd -
 
 if [ ! -f "$INSTALL_DIR/kokkos/lib/cmake/Kokkos/KokkosConfig.cmake" ]; then
   echo "❌ KokkosConfig.cmake not found. Kokkos install may have failed."
   exit 1
 fi
 
+# === OpenCASCADE config ===
+OCC_REPO="https://git.dev.opencascade.org/repos/occt.git"
+OCC_COMMIT="22d437b771eb322dcceec3ad0efec6876721b8a9"
+OCC_DIR="external/opencascade"
+OCC_BUILD_DIR="$OCC_DIR/build"
+OCC_INSTALL_DIR="$INSTALL_DIR/opencascade"
+
+# === Clone OpenCASCADE if needed ===
+if [ ! -d "$OCC_DIR" ]; then
+  echo "📦 Cloning OpenCASCADE at commit $OPENCASCADE_COMMIT..."
+
+  mkdir -p "$(dirname "$OCC_DIR")"
+  git init "$OCC_DIR"
+  cd "$OCC_DIR"
+  git remote add origin "$OCC_REPO"
+  git fetch --depth=1 origin "$OCC_COMMIT"
+  git checkout "$OCC_COMMIT"
+  cd -
+else
+  echo "✅ OpenCASCADE already exists at $OCC_DIR"
+fi
+
+OCC_LIB_DIR="$OCC_INSTALL_DIR/lib"
+
+# === Build OpenCASCADE with Emscripten ===
+mkdir -p "$OCC_BUILD_DIR"
+cd "$OCC_BUILD_DIR"
+
+echo "⚙️  Configuring OpenCASCADE with Emscripten..."
+cmake .. \
+  -DCMAKE_TOOLCHAIN_FILE="$(pwd)/../../../emsdk/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake" \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX="$OCC_INSTALL_DIR" \
+  -DBUILD_MODULE_ApplicationFramework=OFF \
+  -DBUILD_MODULE_Draw=OFF \
+  -DBUILD_MODULE_Visualization=OFF \
+  -DBUILD_MODULE_Inspection=OFF \
+  -DBUILD_MODULE_Modeling=ON \
+  -DBUILD_MODULE_Exchange=ON \
+  -DBUILD_MODULE_DataExchange=ON \
+  -DBUILD_MODULE_ModelingData=ON \
+  -DBUILD_MODULE_ModelingAlgorithms=ON \
+  -DBUILD_MODULE_XCAF=ON \
+  -DBUILD_LIBRARY_TYPE=Static \
+  -DUSE_FREEIMAGE=OFF \
+  -DUSE_FREETYPE=OFF \
+  -DUSE_TBB=OFF \
+  -DUSE_GL2PS=OFF \
+  -DUSE_OPENGL=OFF \
+  -DUSE_XLIB=OFF \
+  -DCXX_COMPILER_LAUNCHER="ccache"
+
+echo "🔨 Building OpenCASCADE..."
+emmake make -j$(nproc)
+emmake make install
+
+cd -
+
 # === Clone deal.II ===
-if [ ! -d "dealii" ]; then
-  git clone --depth=1 -b "$DEAL_II_VERSION" https://github.com/dealii/dealii.git
+DEAL_II_COMMIT="0674a6cf7bf160eb634e37908173b59bb85af789"
+DEAL_II_DIR="dealii"
+DEAL_II_REPO="https://github.com/dealii/dealii.git"
+
+if [ ! -d "$DEAL_II_DIR" ]; then
+  echo "📥 Cloning deal.II at commit $DEAL_II_COMMIT..."
+  git init "$DEAL_II_DIR"
+  cd "$DEAL_II_DIR"
+  git remote add origin "$DEAL_II_REPO"
+  git fetch --depth=1 origin "$DEAL_II_COMMIT"
+  git checkout "$DEAL_II_COMMIT"
+  cd -
+else
+  echo "✅ deal.II already exists at $DEAL_II_DIR"
 fi
 
 # === Native build to generate expand_instantiations tool ===
 if [ ! -f "${NATIVE_BUILD_DIR}/bin/expand_instantiations" ]; then
   mkdir -p "$NATIVE_BUILD_DIR"
   cd "$NATIVE_BUILD_DIR"
-  cmake ../dealii \
+  cmake "../$DEAL_II_DIR" \
     -DCMAKE_BUILD_TYPE=Release \
     -DDEAL_II_COMPONENT_EXAMPLES=OFF \
     -DDEAL_II_BUILD_EXPAND_INSTANTIATIONS=ON
@@ -92,6 +176,7 @@ if [ ! -f "${NATIVE_BUILD_DIR}/bin/expand_instantiations" ]; then
   echo "✅ expand_instantiations_exe built and available at ${NATIVE_BUILD_DIR}/bin/expand_instantiations"
   cd ..
 fi
+
 
 # === Ensure expand_instantiations is usable ===
 if [ ! -x "${NATIVE_BUILD_DIR}/bin/expand_instantiations" ]; then
@@ -107,14 +192,21 @@ cd "$WASM_BUILD_DIR"
 echo "🔍 Using native expand_instantiations: ${NATIVE_BUILD_DIR}/bin/expand_instantiations"
 file "${NATIVE_BUILD_DIR}/bin/expand_instantiations"
 
+OPENCASCADE_LIBRARIES=$(find "$OCC_INSTALL_DIR/lib" -name 'libTK*.a' -o -name 'libTKernel.a' | sort | tr '\n' ';')
+
+
 # === Configure deal.II for Emscripten with upstream Kokkos ===
-emcmake cmake ../dealii \
+emcmake cmake "../$DEAL_II_DIR" \
   -DCMAKE_BUILD_TYPE=Release \
   -DBUILD_SHARED_LIBS=OFF \
   -DCMAKE_SKIP_INSTALL_RULES=ON \
+  -DDEAL_II_COMPONENT_EXAMPLES=OFF \
+  -DDEAL_II_WITH_OPENCASCADE=ON \
+  -DOPENCASCADE_INCLUDE_DIR="$OCC_INSTALL_DIR/include/opencascade" \
+  -DOPENCASCADE_INCLUDE_DIRS="$OCC_INSTALL_DIR/include/opencascade;$OCC_INSTALL_DIR/include" \
+  -DOPENCASCADE_LIBRARIES="$OPENCASCADE_LIBRARIES" \
   -DDEAL_II_WITH_BOOST=ON \
   -DDEAL_II_FORCE_BUNDLED_BOOST=ON \
-  -DDEAL_II_COMPONENT_EXAMPLES=OFF \
   -DDEAL_II_WITH_MPI=OFF \
   -DDEAL_II_WITH_P4EST=OFF \
   -DDEAL_II_WITH_64BIT_INDICES=OFF \
@@ -129,14 +221,14 @@ emcmake cmake ../dealii \
   -DDEAL_II_WITH_ARBORX=OFF \
   -DDEAL_II_WITH_TBB=OFF \
   -DDEAL_II_WITH_KOKKOS=ON \
+  -DKOKKOS_DIR="$KOKKOS_INSTALL_DIR/lib/cmake/Kokkos" \
   -DDEAL_II_FORCE_BUNDLED_TASKFLOW=ON \
   -DDEAL_II_TASKFLOW_BACKEND=Pool \
-  -DKokkos_DIR="$INSTALL_DIR/kokkos/lib/cmake/Kokkos" \
   -DCMAKE_CXX_FLAGS="-pthread -sUSE_PTHREADS=1 -DKOKKOS_IMPL_32BIT" \
   -DDEAL_II_BUILD_EXPAND_INSTANTIATIONS=OFF \
   -DDEAL_II_USE_PRECOMPILED_INSTANCES=ON \
   -DEXPAND_INSTANTIATIONS_EXE="$PWD/../$NATIVE_BUILD_DIR/bin/expand_instantiations" \
-  -DCXX_COMPILER_LAUNCHER="ccache"
+  -DCXX_COMPILER_LAUNCHER="ccache" \
 
 export PATH="$PWD/../$NATIVE_BUILD_DIR/bin:$PATH"
 # === Build deal.II ===
@@ -166,12 +258,18 @@ else
 fi
 
 TASKFLOW_REPO="https://github.com/taskflow/taskflow.git"
+TASKFLOW_COMMIT="83591c4a5f55eb4f0d5760a508da34b7a11f71ee"
 TASKFLOW_DIR="external/taskflow"
-TASKFLOW_TAG="v3.5.0"
 
 if [ ! -d "$TASKFLOW_DIR" ]; then
-  echo "📦 Cloning Taskflow $TASKFLOW_TAG..."
-  git clone --depth 1 --branch "$TASKFLOW_TAG" "$TASKFLOW_REPO" "$TASKFLOW_DIR"
+  echo "📦 Cloning Taskflow at commit $TASKFLOW_COMMIT..."
+  mkdir -p "$(dirname "$TASKFLOW_DIR")"
+  git init "$TASKFLOW_DIR"
+  cd "$TASKFLOW_DIR"
+  git remote add origin "$TASKFLOW_REPO"
+  git fetch --depth=1 origin "$TASKFLOW_COMMIT"
+  git checkout "$TASKFLOW_COMMIT"
+  cd -
 else
   echo "✅ Taskflow already exists at $TASKFLOW_DIR"
 fi
