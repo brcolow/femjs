@@ -2,6 +2,80 @@
 
 set -e
 
+patch_dealii_for_emscripten() {
+  echo "🛠️ Patching deal.II for Emscripten compatibility..."
+
+  # --- Fake MPI detection ---
+  local file="../dealii/cmake/configure/configure_10_mpi.cmake"
+  if [ -f "$file" ] && ! grep -q "FAKEMPI_SKIP_FIND_PACKAGE" "$file"; then
+    echo "🔧 Patching MPI config..."
+    sed -i '/^[ \t]*find_package[(]MPI.*$/d' "$file"
+    sed -i '/^[ \t]*configure_feature[(]MPI.*$/d' "$file"
+    sed -i '/^macro(feature_mpi_find_external/,/^endmacro()/d' "$file"
+    cat << 'EOF' >> "$file"
+
+# ==== FAKEMPI_SKIP_FIND_PACKAGE ====
+macro(feature_mpi_find_external var)
+  message(STATUS "✅ Skipping real MPI detection — using FakeMPI for Emscripten build")
+  set(MPI_FOUND TRUE)
+  set(${var} TRUE)
+endmacro()
+
+set(DEAL_II_WITH_MPI TRUE CACHE BOOL "Force enabled via FakeMPI patch")
+EOF
+  fi
+
+  # --- Skip HDF5 compiler tests ---
+  file="../dealii/cmake/modules/FindDEAL_II_HDF5.cmake"
+  if [ -f "$file" ] && ! grep -q "FAKEHDF5_PATCH" "$file"; then
+    echo "🔧 Patching HDF5 config..."
+    sed -i '/^[ \t]*find_package[(]HDF5/ i\
+# === FAKEHDF5_PATCH: bypass HDF5 detection for Emscripten\n\
+message(STATUS "✅ Using manually configured HDF5 for Emscripten build")\n\
+set(HDF5_FOUND TRUE)\n\
+set(HDF5_INCLUDE_DIRS \"$ENV{HDF5_INCLUDE_DIR}\")\n\
+set(HDF5_LIBRARIES \"$ENV{HDF5_LIBRARY};$ENV{HDF5_HL_LIBRARY}\")\n\
+return()\n' "$file"
+  fi
+
+  # --- List of features to fully disable ---
+  local features=(
+    petsc
+    metis
+    trilinos
+    adolc
+    arborx
+    p4est
+    scalapack
+    slepc
+    arpack
+    umfpack
+    hypre
+    cuda
+  )
+
+  for name in "${features[@]}"; do
+    upper_name=$(echo "$name" | tr '[:lower:]' '[:upper:]')
+
+    # All known features currently live in configure_20 or configure_50
+    if [[ "$name" =~ ^(adolc|arborx|p4est|scalapack|slepc|arpack|umfpack|hypre|cuda)$ ]]; then
+      patch="../dealii/cmake/configure/configure_50_${name}.cmake"
+    else
+      patch="../dealii/cmake/configure/configure_20_${name}.cmake"
+    fi
+
+    if [ -f "$patch" ] && ! grep -q "FAKE${upper_name}_PATCH" "$patch"; then
+      echo "🔧 Disabling $upper_name..."
+      cat <<EOF > "$patch"
+# ==== FAKE${upper_name}_PATCH ====
+message(STATUS "⛔ Skipping ${upper_name} detection for Emscripten build")
+set(DEAL_II_WITH_${upper_name} OFF CACHE BOOL "Disabled ${upper_name} for Emscripten")
+return()
+EOF
+    fi
+  done
+}
+
 # === Check for required tools ===
 declare -A packages=(
     ["cmake"]="cmake"
@@ -49,9 +123,85 @@ if [ ! -d "emsdk" ]; then
 fi
 source ./emsdk/emsdk_env.sh
 
-# === Build upstream Kokkos ===
+# === Clone FakeMPI ===
+FAKE_MPI_DIR="external/fake_mpi"
+if [ ! -d "$FAKE_MPI_DIR" ]; then
+  echo "📦 Cloning FakeMPI..."
+  git clone https://github.com/ssciwr/FakeMPI "$FAKE_MPI_DIR"
+else
+  echo "✅ FakeMPI already exists at $FAKE_MPI_DIR"
+fi
+
+# === Export FakeMPI config for CMake to detect ===
+FAKE_MPI_DIR="$PWD/external/fake_mpi"
+FAKE_MPI_INCLUDE="$FAKE_MPI_DIR/include"
+
+export MPI_C_COMPILER=emcc
+export MPI_CXX_COMPILER=em++
+export MPIEXEC_EXECUTABLE=FALSE
+export MPI_INCLUDE_PATH="$FAKE_MPI_INCLUDE"
+export MPI_LIBRARY=FAKE
+FAKE_MPI_FLAGS="-include mpi.h -I$FAKE_MPI_INCLUDE"
+
+FAKE_MPI_UNIMPI="$FAKE_MPI_DIR/include/unimpi.h"
+if ! grep -q "MPI_CXX_BOOL" "$FAKE_MPI_UNIMPI"; then
+  echo "🔧 Extending FakeMPI with missing MPI constants..."
+  cat <<'EOF' >> "$FAKE_MPI_UNIMPI"
+
+// ==== deal.II compatibility stubs ====
+#ifndef MPI_CXX_BOOL
+#define MPI_CXX_BOOL 0x4C16
+#endif
+
+#ifndef MPI_WCHAR
+#define MPI_WCHAR 0x4C1E
+#endif
+
+#ifndef MPI_WIN
+typedef int MPI_Win;
+#endif
+EOF
+fi
+
+# === Build HDF5 ===
+HDF5_REPO="https://github.com/HDFGroup/hdf5"
+HDF5_COMMIT="a0e6450218e99ae76ad480da883023b6c64bac8a"
+HDF5_DIR="external/hdf5"
+HDF5_INSTALL_DIR="$INSTALL_DIR/hdf5"
+
+if [ ! -d "$HDF5_DIR" ]; then
+  echo "📦 Cloning HDF5 at commit $HDF5_COMMIT..."
+  mkdir -p "$(dirname "$HDF5_DIR")"
+  git init "$HDF5_DIR"
+  cd "$HDF5_DIR"
+  git remote add origin "$HDF5_REPO"
+  git fetch --depth=1 origin "$HDF5_COMMIT"
+  git checkout "$HDF5_COMMIT"
+  cd -
+else
+  echo "✅ HDF5 already exists at $HDF5_DIR"
+fi
+
+mkdir -p "$HDF5_DIR/build"
+cd "$HDF5_DIR/build"
+
+emcmake cmake .. -G "Unix Makefiles" \
+  -DCMAKE_BUILD_TYPE:STRING=Release \
+  -DBUILD_SHARED_LIBS:BOOL=OFF \
+  -DCMAKE_INSTALL_PREFIX="$HDF5_INSTALL_DIR" \
+  -DCMAKE_CXX_STANDARD=17 \
+  -DBUILD_SHARED_LIBS=OFF \
+  -DBUILD_TESTING:BOOL=OFF \
+  -DHDF5_BUILD_TOOLS:BOOL=OFF \
+  -DCMAKE_CXX_COMPILER_LAUNCHER="ccache"
+
+cmake --build . --config Release -- -j$(nproc)
+cmake --build . --target install
+cd -
+
+# === Build Kokkos ===
 KOKKOS_REPO="https://github.com/kokkos/kokkos.git"
-KOKKOS_COMMIT="3e7dfc68cc1fb371c345ef42cb0f0d97caee8b81"  # example commit
+KOKKOS_COMMIT="3e7dfc68cc1fb371c345ef42cb0f0d97caee8b81"
 KOKKOS_DIR="external/kokkos"
 KOKKOS_INSTALL_DIR="$INSTALL_DIR/kokkos"
 
@@ -78,10 +228,11 @@ emcmake cmake .. \
   -DBUILD_SHARED_LIBS=OFF \
   -DKOKKOS_IMPL_32BIT=ON \
   -DKokkos_ENABLE_DEPRECATED_CODE=OFF \
-  -DCMAKE_CXX_FLAGS="-DKOKKOS_IMPL_32BIT -pthread -matomics -mbulk-memory"
+  -DCMAKE_CXX_FLAGS="-DKOKKOS_IMPL_32BIT -pthread -matomics -mbulk-memory" \
+  -DCMAKE_CXX_COMPILER_LAUNCHER="ccache"
 
-make -j${THREADS}
-make install
+emmake make -j${THREADS}
+emmake make install
 cd -
 
 if [ ! -f "$INSTALL_DIR/kokkos/lib/cmake/Kokkos/KokkosConfig.cmake" ]; then
@@ -89,14 +240,13 @@ if [ ! -f "$INSTALL_DIR/kokkos/lib/cmake/Kokkos/KokkosConfig.cmake" ]; then
   exit 1
 fi
 
-# === OpenCASCADE config ===
+# === Build OpenCASCADE ===
 OCC_REPO="https://git.dev.opencascade.org/repos/occt.git"
 OCC_COMMIT="22d437b771eb322dcceec3ad0efec6876721b8a9"
 OCC_DIR="external/opencascade"
 OCC_BUILD_DIR="$OCC_DIR/build"
 OCC_INSTALL_DIR="$INSTALL_DIR/opencascade"
 
-# === Clone OpenCASCADE if needed ===
 if [ ! -d "$OCC_DIR" ]; then
   echo "📦 Cloning OpenCASCADE at commit $OPENCASCADE_COMMIT..."
 
@@ -113,7 +263,6 @@ fi
 
 OCC_LIB_DIR="$OCC_INSTALL_DIR/lib"
 
-# === Build OpenCASCADE with Emscripten ===
 mkdir -p "$OCC_BUILD_DIR"
 cd "$OCC_BUILD_DIR"
 
@@ -139,7 +288,7 @@ cmake .. \
   -DUSE_GL2PS=OFF \
   -DUSE_OPENGL=OFF \
   -DUSE_XLIB=OFF \
-  -DCXX_COMPILER_LAUNCHER="ccache"
+  -DCMAKE_CXX_COMPILER_LAUNCHER="ccache"
 
 echo "🔨 Building OpenCASCADE..."
 emmake make -j$(nproc)
@@ -147,7 +296,7 @@ emmake make install
 
 cd -
 
-# === Clone deal.II ===
+# === Build deal.II ===
 DEAL_II_COMMIT="0674a6cf7bf160eb634e37908173b59bb85af789"
 DEAL_II_DIR="dealii"
 DEAL_II_REPO="https://github.com/dealii/dealii.git"
@@ -192,10 +341,53 @@ cd "$WASM_BUILD_DIR"
 echo "🔍 Using native expand_instantiations: ${NATIVE_BUILD_DIR}/bin/expand_instantiations"
 file "${NATIVE_BUILD_DIR}/bin/expand_instantiations"
 
-OPENCASCADE_LIBRARIES=$(find "$OCC_INSTALL_DIR/lib" -name 'libTK*.a' -o -name 'libTKernel.a' | sort | tr '\n' ';')
+OPENCASCADE_LIBRARIES=$(find "$OCC_INSTALL_DIR/lib" -name 'libTK*.a' -o -name 'lib	TKernel.a' | sort | tr '\n' ';')
+export HDF5_INCLUDE_DIR="$INSTALL_DIR/hdf5/include"
+export HDF5_LIBRARY="$INSTALL_DIR/hdf5/lib/libhdf5.a"
+export HDF5_HL_LIBRARY="$INSTALL_DIR/hdf5/lib/libhdf5_hl.a"
 
+pwd
+echo "🩹 Hard-patching deal.II to bypass CMake FindHDF5 test..."
 
-# === Configure deal.II for Emscripten with upstream Kokkos ===
+PATCH_HDF5_FIND="../dealii/cmake/modules/FindDEAL_II_HDF5.cmake"
+
+# Replace the find_package(HDF5 ...) call with a stub
+if ! grep -q "set(HDF5_FOUND TRUE)" "$PATCH_HDF5_FIND"; then
+  sed -i '/^[ \t]*find_package[(]HDF5/ i\
+set(HDF5_FOUND TRUE)\n\
+set(HDF5_INCLUDE_DIRS "$ENV{HDF5_INCLUDE_DIR}")\n\
+set(HDF5_LIBRARIES "$ENV{HDF5_LIBRARY};$ENV{HDF5_HL_LIBRARY}")\n\
+return()\n' "$PATCH_HDF5_FIND"
+fi
+
+PATCH_MPI="../dealii/cmake/configure/configure_10_mpi.cmake"
+
+if [ -f "$PATCH_MPI" ] && ! grep -q "FAKEMPI_SKIP_FIND_PACKAGE" "$PATCH_MPI"; then
+  echo "🩹 Patching deal.II to fully skip native MPI detection..."
+
+  # Remove or comment out all configure_feature() and find_package calls
+  sed -i '/^[ \t]*find_package[(]MPI.*$/d' "$PATCH_MPI"
+  sed -i '/^[ \t]*configure_feature[(]MPI.*$/d' "$PATCH_MPI"
+
+  # Replace macro with stub that forces enable
+  sed -i '/^macro(feature_mpi_find_external/,/^endmacro()/d' "$PATCH_MPI"
+
+  cat << 'EOF' >> "$PATCH_MPI"
+
+# ==== FAKEMPI_SKIP_FIND_PACKAGE ====
+macro(feature_mpi_find_external var)
+  message(STATUS "✅ Skipping real MPI detection — using FakeMPI for Emscripten build")
+  set(MPI_FOUND TRUE)
+  set(${var} TRUE)
+endmacro()
+
+# ==== Force MPI feature manually ====
+set(DEAL_II_WITH_MPI TRUE CACHE BOOL "Force enabled via FakeMPI patch")
+EOF
+fi
+
+patch_dealii_for_emscripten
+
 emcmake cmake "../$DEAL_II_DIR" \
   -DCMAKE_BUILD_TYPE=Release \
   -DBUILD_SHARED_LIBS=OFF \
@@ -207,11 +399,20 @@ emcmake cmake "../$DEAL_II_DIR" \
   -DOPENCASCADE_LIBRARIES="$OPENCASCADE_LIBRARIES" \
   -DDEAL_II_WITH_BOOST=ON \
   -DDEAL_II_FORCE_BUNDLED_BOOST=ON \
-  -DDEAL_II_WITH_MPI=OFF \
+   -DDEAL_II_WITH_MPI=ON \
+  -DMPI_C_COMPILER="$MPI_C_COMPILER" \
+  -DMPI_CXX_COMPILER="$MPI_CXX_COMPILER" \
+  -DMPIEXEC_EXECUTABLE="$MPIEXEC_EXECUTABLE" \
+  -DMPI_INCLUDE_PATH="$MPI_INCLUDE_PATH" \
+  -DMPI_LIBRARY="$MPI_LIBRARY" \
   -DDEAL_II_WITH_P4EST=OFF \
   -DDEAL_II_WITH_64BIT_INDICES=OFF \
   -DDEAL_II_WITH_LAPACK=OFF \
-  -DDEAL_II_WITH_HDF5=OFF \
+  -DDEAL_II_WITH_HDF5=ON \
+  -DCMAKE_PREFIX_PATH="$HDF5_INSTALL_DIR" \
+  -DHDF5_INCLUDE_DIR="$HDF5_INSTALL_DIR/include" \
+  -DHDF5_LIBRARY="$HDF5_INSTALL_DIR/lib/libhdf5.a" \
+  -DHDF5_HL_LIBRARY="$HDF5_INSTALL_DIR/lib/libhdf5_hl.a" \
   -DDEAL_II_WITH_TRILINOS=OFF \
   -DDEAL_II_WITH_SUNDIALS=OFF \
   -DDEAL_II_WITH_MUMPS=OFF \
@@ -224,14 +425,13 @@ emcmake cmake "../$DEAL_II_DIR" \
   -DKOKKOS_DIR="$KOKKOS_INSTALL_DIR/lib/cmake/Kokkos" \
   -DDEAL_II_FORCE_BUNDLED_TASKFLOW=ON \
   -DDEAL_II_TASKFLOW_BACKEND=Pool \
-  -DCMAKE_CXX_FLAGS="-pthread -sUSE_PTHREADS=1 -DKOKKOS_IMPL_32BIT" \
+  -DCMAKE_CXX_FLAGS="$FAKE_MPI_FLAGS -pthread -sUSE_PTHREADS=1 -DKOKKOS_IMPL_32BIT" \
   -DDEAL_II_BUILD_EXPAND_INSTANTIATIONS=OFF \
   -DDEAL_II_USE_PRECOMPILED_INSTANCES=ON \
   -DEXPAND_INSTANTIATIONS_EXE="$PWD/../$NATIVE_BUILD_DIR/bin/expand_instantiations" \
   -DCXX_COMPILER_LAUNCHER="ccache" \
 
 export PATH="$PWD/../$NATIVE_BUILD_DIR/bin:$PATH"
-# === Build deal.II ===
 emmake make -j${THREADS}
 
 BOOST_VERSION="1.84.0"
@@ -276,20 +476,47 @@ fi
 
 # === Write a minimal example ===
 cat > "${EXAMPLE_NAME}.cc" <<EOF
+#include <deal.II/base/utilities.h>
 #include <deal.II/grid/tria.h>
 #include <deal.II/grid/grid_generator.h>
-#include <deal.II/base/logstream.h>
+#include <deal.II/opencascade/utilities.h>
+#include <deal.II/opencascade/occ_geometry.h>
+#include <H5public.h>
 #include <iostream>
 
 int main()
 {
-  // dealii::MultithreadInfo::set_thread_limit(1); // Disable multithreading!
+  std::cout << "HDF5 version: " << H5_VERS_MAJOR << "." << H5_VERS_MINOR << std::endl;
 
-  dealii::Triangulation<2> tria;
-  dealii::GridGenerator::hyper_cube(tria);
-  tria.refine_global(2);
+  // ----- 2D Triangulation test -----
+  dealii::Triangulation<2> tria_2d;
+  dealii::GridGenerator::hyper_cube(tria_2d);
+  tria_2d.refine_global(2);
+  std::cout << "2D Active cells: " << tria_2d.n_active_cells() << "\n";
 
-  std::cout << "Active cells: " << tria.n_active_cells() << "\n";
+  try
+  {
+    // ----- OpenCASCADE 3D shape test -----
+    TopoDS_Shape box_shape = dealii::OpenCASCADE::create_box(
+      dealii::Point<3>(0, 0, 0),
+      dealii::Point<3>(1, 1, 1));
+    std::cout << "Created OpenCASCADE box shape.\n";
+
+    // Wrap shape in Geometry object
+    dealii::OpenCASCADE::Geometry<3> occ_geometry(box_shape);
+    std::cout << "Wrapped shape in OCC Geometry.\n";
+
+    // Create triangulation from the OCC geometry
+    dealii::Triangulation<3> tria_3d;
+    occ_geometry.create_triangulation(tria_3d);
+    std::cout << "3D Active cells (from OCC): " << tria_3d.n_active_cells() << "\n";
+  }
+  catch (const std::exception &e)
+  {
+    std::cerr << "OCC error: " << e.what() << "\n";
+    return 1;
+  }
+
   return 0;
 }
 EOF
@@ -305,6 +532,8 @@ em++ -O1 "${EXAMPLE_NAME}.cc" ./lib/libdeal_II.a \
   -I"$INSTALL_DIR/kokkos/include" \
   -I"$BOOST_DIR" \
   -I"$TASKFLOW_DIR" \
+  -I"$HDF5_INSTALL_DIR/src" \
+  "$HDF5_INSTALL_DIR/lib/libhdf5.a" \
   -std=c++17 \
   -sINITIAL_MEMORY=2048MB \
   -sEXIT_RUNTIME=1 \
