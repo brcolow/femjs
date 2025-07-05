@@ -32,7 +32,6 @@ done
 
 echo "All required tools checked."
 
-# === Config ===
 INSTALL_DIR="$(pwd)/install"
 NATIVE_BUILD_DIR="native_build"
 WASM_BUILD_DIR="dealii_wasm_build"
@@ -49,7 +48,7 @@ if [ ! -d "emsdk" ]; then
 fi
 source ./emsdk/emsdk_env.sh
 
-# === Build upstream Kokkos ===
+# === Kokkos ===
 KOKKOS_REPO="https://github.com/kokkos/kokkos.git"
 KOKKOS_COMMIT="3e7dfc68cc1fb371c345ef42cb0f0d97caee8b81"  # example commit
 KOKKOS_DIR="external/kokkos"
@@ -89,14 +88,13 @@ if [ ! -f "$INSTALL_DIR/kokkos/lib/cmake/Kokkos/KokkosConfig.cmake" ]; then
   exit 1
 fi
 
-# === OpenCASCADE config ===
+# === OpenCASCADE ===
 OCC_REPO="https://git.dev.opencascade.org/repos/occt.git"
 OCC_COMMIT="22d437b771eb322dcceec3ad0efec6876721b8a9"
 OCC_DIR="external/opencascade"
 OCC_BUILD_DIR="$OCC_DIR/build"
 OCC_INSTALL_DIR="$INSTALL_DIR/opencascade"
 
-# === Clone OpenCASCADE if needed ===
 if [ ! -d "$OCC_DIR" ]; then
   echo "📦 Cloning OpenCASCADE at commit $OPENCASCADE_COMMIT..."
 
@@ -113,7 +111,6 @@ fi
 
 OCC_LIB_DIR="$OCC_INSTALL_DIR/lib"
 
-# === Build OpenCASCADE with Emscripten ===
 mkdir -p "$OCC_BUILD_DIR"
 cd "$OCC_BUILD_DIR"
 
@@ -123,6 +120,8 @@ cmake .. \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX="$OCC_INSTALL_DIR" \
   -DBUILD_MODULE_ApplicationFramework=OFF \
+  -DCMAKE_C_FLAGS="-sUSE_PTHREADS=1 -matomics -mbulk-memory" \
+  -DCMAKE_CXX_FLAGS="-sUSE_PTHREADS=1 -matomics -mbulk-memory" \
   -DBUILD_MODULE_Draw=OFF \
   -DBUILD_MODULE_Visualization=OFF \
   -DBUILD_MODULE_Inspection=OFF \
@@ -146,11 +145,30 @@ emmake make -j$(nproc)
 emmake make install
 
 cd -
-
-# === Clone deal.II ===
+# === deal.II ===
 DEAL_II_COMMIT="0674a6cf7bf160eb634e37908173b59bb85af789"
 DEAL_II_DIR="dealii"
 DEAL_II_REPO="https://github.com/dealii/dealii.git"
+
+# === Patches ===
+PATCH_FILE="$DEAL_II_DIR/cmake/modules/FindDEAL_II_OPENCASCADE.cmake"
+
+if ! grep -q "🟢 Skipping OPENCASCADE find_library calls" "$PATCH_FILE"; then
+  echo "🛠️  Patching $PATCH_FILE to skip find_library for OPENCASCADE_LIBRARIES..."
+
+  sed -i '/foreach(_library ${_opencascade_libraries})/i \
+if(OPENCASCADE_LIBRARIES AND OPENCASCADE_INCLUDE_DIR)\n\
+  message(STATUS "🟢 Skipping OPENCASCADE find_library calls because OPENCASCADE_LIBRARIES was provided manually.")\n\
+  process_feature(OPENCASCADE\n\
+    LIBRARIES REQUIRED OPENCASCADE_LIBRARIES\n\
+    INCLUDE_DIRS REQUIRED OPENCASCADE_INCLUDE_DIR\n\
+  )\n\
+  return()\n\
+endif()\n' "$PATCH_FILE"
+
+else
+  echo "✅ Patch already applied to $PATCH_FILE"
+fi
 
 if [ ! -d "$DEAL_II_DIR" ]; then
   echo "📥 Cloning deal.II at commit $DEAL_II_COMMIT..."
@@ -194,8 +212,7 @@ file "${NATIVE_BUILD_DIR}/bin/expand_instantiations"
 
 OPENCASCADE_LIBRARIES=$(find "$OCC_INSTALL_DIR/lib" -name 'libTK*.a' -o -name 'libTKernel.a' | sort | tr '\n' ';')
 
-
-# === Configure deal.II for Emscripten with upstream Kokkos ===
+# === Configure deal.II ===
 emcmake cmake "../$DEAL_II_DIR" \
   -DCMAKE_BUILD_TYPE=Release \
   -DBUILD_SHARED_LIBS=OFF \
@@ -231,9 +248,9 @@ emcmake cmake "../$DEAL_II_DIR" \
   -DCXX_COMPILER_LAUNCHER="ccache" \
 
 export PATH="$PWD/../$NATIVE_BUILD_DIR/bin:$PATH"
-# === Build deal.II ===
 emmake make -j${THREADS}
 
+# === Boost ===
 BOOST_VERSION="1.84.0"
 BOOST_DIR="external/boost"
 BOOST_TARBALL="boost_1_84_0.tar.gz"
@@ -257,6 +274,7 @@ else
   echo "✅ Boost already exists at $BOOST_DIR"
 fi
 
+# === Taskflow ===
 TASKFLOW_REPO="https://github.com/taskflow/taskflow.git"
 TASKFLOW_COMMIT="83591c4a5f55eb4f0d5760a508da34b7a11f71ee"
 TASKFLOW_DIR="external/taskflow"
@@ -274,28 +292,35 @@ else
   echo "✅ Taskflow already exists at $TASKFLOW_DIR"
 fi
 
-# === Write a minimal example ===
+# === Minimal example ===
 cat > "${EXAMPLE_NAME}.cc" <<EOF
-#include <deal.II/grid/tria.h>
-#include <deal.II/grid/grid_generator.h>
-#include <deal.II/base/logstream.h>
+#include <deal.II/base/point.h>
+#include <deal.II/opencascade/utilities.h>
+
+#include <BRepPrimAPI_MakeBox.hxx>
 #include <iostream>
 
 int main()
 {
-  // dealii::MultithreadInfo::set_thread_limit(1); // Disable multithreading!
+  using namespace dealii;
 
-  dealii::Triangulation<2> tria;
-  dealii::GridGenerator::hyper_cube(tria);
-  tria.refine_global(2);
+  TopoDS_Shape shape = BRepPrimAPI_MakeBox(1.0, 1.0, 1.0).Shape();
+  std::cout << "✅ OCC shape created.\n";
 
-  std::cout << "Active cells: " << tria.n_active_cells() << "\n";
+  Point<3> query(1.2, 0.5, 0.5);
+  const double tol = 1e-6;
+
+  Point<3> closest = OpenCASCADE::closest_point(shape, query, tol);
+  std::cout << "Query point:   " << query << "\n";
+  std::cout << "Closest point: " << closest << "\n";
+
   return 0;
 }
 EOF
 
 # === Compile example to WebAssembly ===
 em++ -O1 "${EXAMPLE_NAME}.cc" ./lib/libdeal_II.a \
+  $(find "$OCC_INSTALL_DIR/lib" -name 'libTK*.a' -o -name 'libTKernel.a' | sort | xargs) \
   "$INSTALL_DIR/kokkos/lib/libkokkoscontainers.a" \
   "$INSTALL_DIR/kokkos/lib/libkokkoscore.a" \
   -sASSERTIONS=2 -sEXIT_RUNTIME=1 -sENVIRONMENT=web \
@@ -303,6 +328,8 @@ em++ -O1 "${EXAMPLE_NAME}.cc" ./lib/libdeal_II.a \
   -I../dealii/bundled/taskflow-3.10.0 \
   -I./include \
   -I"$INSTALL_DIR/kokkos/include" \
+  -I"$INSTALL_DIR/opencascade/include/opencascade" \
+  -I"$INSTALL_DIR/opencascade/include" \
   -I"$BOOST_DIR" \
   -I"$TASKFLOW_DIR" \
   -std=c++17 \
