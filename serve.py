@@ -1,4 +1,3 @@
-# serve_with_threads.py
 import http.server
 import socketserver
 

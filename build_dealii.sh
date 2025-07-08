@@ -8,6 +8,7 @@ declare -A packages=(
     ["ccache"]="ccache"
     ["git"]="git"
     ["make"]="build-essential"
+    ["ninja"]="ninja-build"
 )
 
 for cmd in "${!packages[@]}"; do
@@ -77,10 +78,11 @@ emcmake cmake .. \
   -DBUILD_SHARED_LIBS=OFF \
   -DKOKKOS_IMPL_32BIT=ON \
   -DKokkos_ENABLE_DEPRECATED_CODE=OFF \
-  -DCMAKE_CXX_FLAGS="-DKOKKOS_IMPL_32BIT -pthread -matomics -mbulk-memory"
+  -DCMAKE_CXX_FLAGS="-DKOKKOS_IMPL_32BIT -pthread -matomics -mbulk-memory" \
+  -G "Ninja"
 
-make -j${THREADS}
-make install
+ninja -j${THREADS}
+ninja install
 cd -
 
 if [ ! -f "$INSTALL_DIR/kokkos/lib/cmake/Kokkos/KokkosConfig.cmake" ]; then
@@ -96,7 +98,7 @@ OCC_BUILD_DIR="$OCC_DIR/build"
 OCC_INSTALL_DIR="$INSTALL_DIR/opencascade"
 
 if [ ! -d "$OCC_DIR" ]; then
-  echo "📦 Cloning OpenCASCADE at commit $OPENCASCADE_COMMIT..."
+  echo "📦 Cloning OpenCASCADE at commit $OCC_COMMIT..."
 
   mkdir -p "$(dirname "$OCC_DIR")"
   git init "$OCC_DIR"
@@ -138,17 +140,30 @@ cmake .. \
   -DUSE_GL2PS=OFF \
   -DUSE_OPENGL=OFF \
   -DUSE_XLIB=OFF \
-  -DCXX_COMPILER_LAUNCHER="ccache"
+  -DCXX_COMPILER_LAUNCHER="ccache" \
+  -G "Ninja"
 
 echo "🔨 Building OpenCASCADE..."
-emmake make -j$(nproc)
-emmake make install
+emmake ninja -j${THREADS}
+emmake ninja install
 
 cd -
 # === deal.II ===
 DEAL_II_COMMIT="0674a6cf7bf160eb634e37908173b59bb85af789"
 DEAL_II_DIR="dealii"
 DEAL_II_REPO="https://github.com/dealii/dealii.git"
+
+if [ ! -d "$DEAL_II_DIR" ]; then
+  echo "📥 Cloning deal.II at commit $DEAL_II_COMMIT..."
+  git init "$DEAL_II_DIR"
+  cd "$DEAL_II_DIR"
+  git remote add origin "$DEAL_II_REPO"
+  git fetch --depth=1 origin "$DEAL_II_COMMIT"
+  git checkout "$DEAL_II_COMMIT"
+  cd -
+else
+  echo "✅ deal.II already exists at $DEAL_II_DIR"
+fi
 
 # === Patches ===
 PATCH_FILE="$DEAL_II_DIR/cmake/modules/FindDEAL_II_OPENCASCADE.cmake"
@@ -168,18 +183,6 @@ endif()\n' "$PATCH_FILE"
 
 else
   echo "✅ Patch already applied to $PATCH_FILE"
-fi
-
-if [ ! -d "$DEAL_II_DIR" ]; then
-  echo "📥 Cloning deal.II at commit $DEAL_II_COMMIT..."
-  git init "$DEAL_II_DIR"
-  cd "$DEAL_II_DIR"
-  git remote add origin "$DEAL_II_REPO"
-  git fetch --depth=1 origin "$DEAL_II_COMMIT"
-  git checkout "$DEAL_II_COMMIT"
-  cd -
-else
-  echo "✅ deal.II already exists at $DEAL_II_DIR"
 fi
 
 # === Native build to generate expand_instantiations tool ===
@@ -246,9 +249,10 @@ emcmake cmake "../$DEAL_II_DIR" \
   -DDEAL_II_USE_PRECOMPILED_INSTANCES=ON \
   -DEXPAND_INSTANTIATIONS_EXE="$PWD/../$NATIVE_BUILD_DIR/bin/expand_instantiations" \
   -DCXX_COMPILER_LAUNCHER="ccache" \
+  -G "Ninja"
 
 export PATH="$PWD/../$NATIVE_BUILD_DIR/bin:$PATH"
-emmake make -j${THREADS}
+emmake ninja -j${THREADS}
 
 # === Boost ===
 BOOST_VERSION="1.84.0"
@@ -354,4 +358,8 @@ echo "✅ Build complete."
 echo "📄 Output: ${WASM_BUILD_DIR}/${EXAMPLE_NAME}.html"
 echo "🌐 Serving built assets..."
 python3 serve.py
-xdg-open http://localhost:8000/dealii_wasm_build/minimal_dealii.html
+if [ "$(systemd-detect-virt)" = "wsl" ]; then
+  cmd.exe /C start http://localhost:8000/dealii_wasm_build/minimal_dealii.html
+else
+  xdg-open http://localhost:8000/dealii_wasm_build/minimal_dealii.html
+fi
