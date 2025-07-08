@@ -1,6 +1,47 @@
 #!/bin/bash
+set -euo pipefail
 
-set -e
+if [[ "${1:-}" == "clean" || "${1:-}" == "--clean" || "${1:-}" == "-c" ]]; then
+  echo "🧹 Cleaning build and dependency directories..."
+  rm -rf external install dealii dealii_wasm_build native_build
+  echo "✅ Clean complete."
+  exit 0
+fi
+
+# If you change the commit hash (or version) re-running the script will download new versions automatically.
+KOKKOS_COMMIT="3e7dfc68cc1fb371c345ef42cb0f0d97caee8b81"
+OCC_COMMIT="22d437b771eb322dcceec3ad0efec6876721b8a9"
+DEAL_II_COMMIT="0674a6cf7bf160eb634e37908173b59bb85af789"
+TASKFLOW_COMMIT="83591c4a5f55eb4f0d5760a508da34b7a11f71ee"
+BOOST_VERSION="1.84.0"
+
+ensure_git_checkout() {
+  local repo_url="$1"
+  local commit_hash="$2"
+  local target_dir="$3"
+
+  if [ -d "$target_dir" ]; then
+    local current_commit
+    current_commit=$(git -C "$target_dir" rev-parse HEAD 2>/dev/null || echo "")
+    if [ "$current_commit" = "$commit_hash" ]; then
+      echo "✅ Already cloned at commit ${commit_hash:0:10} → $target_dir"
+      return
+    else
+      echo "⚠️ Commit mismatch in $target_dir"
+      echo "   Found:    ${current_commit:0:10}"
+      echo "   Expected: ${commit_hash:0:10}"
+      echo "🧹 Removing old directory..."
+      rm -rf "$target_dir"
+    fi
+  fi
+
+  echo "📦 Cloning $repo_url at commit ${commit_hash:0:10}..."
+  mkdir -p "$(dirname "$target_dir")"
+  git init "$target_dir"
+  git -C "$target_dir" remote add origin "$repo_url"
+  git -C "$target_dir" fetch --depth=1 origin "$commit_hash" --quiet
+  git -C "$target_dir" checkout "$commit_hash" --quiet
+}
 
 # === Check for required tools ===
 declare -A packages=(
@@ -9,6 +50,7 @@ declare -A packages=(
     ["git"]="git"
     ["make"]="build-essential"
     ["ninja"]="ninja-build"
+    ["jq"]="jq"
 )
 
 for cmd in "${!packages[@]}"; do
@@ -41,32 +83,31 @@ THREADS=$(nproc)
 
 # === Setup Emscripten ===
 if [ ! -d "emsdk" ]; then
+  echo "📥 Cloning emsdk..."
   git clone https://github.com/emscripten-core/emsdk.git
-  cd emsdk
+fi
+
+cd emsdk
+git pull --quiet
+
+# Extract latest upstream tag from local JSON
+LATEST_VERSION=$(jq -r '.aliases.latest' emscripten-releases-tags.json)
+CURRENT_VERSION=$(./emsdk list | grep -E '^\s*\*' | awk '{print $2}')
+
+if [ -z "$CURRENT_VERSION" ] || [ "$CURRENT_VERSION" != "$LATEST_VERSION" ]; then
   ./emsdk install latest
   ./emsdk activate latest
-  cd ..
 fi
+
+cd ..
 source ./emsdk/emsdk_env.sh
 
 # === Kokkos ===
 KOKKOS_REPO="https://github.com/kokkos/kokkos.git"
-KOKKOS_COMMIT="3e7dfc68cc1fb371c345ef42cb0f0d97caee8b81"  # example commit
 KOKKOS_DIR="external/kokkos"
 KOKKOS_INSTALL_DIR="$INSTALL_DIR/kokkos"
 
-if [ ! -d "$KOKKOS_DIR" ]; then
-  echo "📦 Cloning Kokkos at commit $KOKKOS_COMMIT..."
-  mkdir -p "$(dirname "$KOKKOS_DIR")"
-  git init "$KOKKOS_DIR"
-  cd "$KOKKOS_DIR"
-  git remote add origin "$KOKKOS_REPO"
-  git fetch --depth=1 origin "$KOKKOS_COMMIT"
-  git checkout "$KOKKOS_COMMIT"
-  cd -
-else
-  echo "✅ Kokkos already exists at $KOKKOS_DIR"
-fi
+ensure_git_checkout "$KOKKOS_REPO" "$KOKKOS_COMMIT" "$KOKKOS_DIR"
 
 mkdir -p "$KOKKOS_DIR/build"
 cd "$KOKKOS_DIR/build"
@@ -92,26 +133,12 @@ fi
 
 # === OpenCASCADE ===
 OCC_REPO="https://git.dev.opencascade.org/repos/occt.git"
-OCC_COMMIT="22d437b771eb322dcceec3ad0efec6876721b8a9"
 OCC_DIR="external/opencascade"
 OCC_BUILD_DIR="$OCC_DIR/build"
 OCC_INSTALL_DIR="$INSTALL_DIR/opencascade"
-
-if [ ! -d "$OCC_DIR" ]; then
-  echo "📦 Cloning OpenCASCADE at commit $OCC_COMMIT..."
-
-  mkdir -p "$(dirname "$OCC_DIR")"
-  git init "$OCC_DIR"
-  cd "$OCC_DIR"
-  git remote add origin "$OCC_REPO"
-  git fetch --depth=1 origin "$OCC_COMMIT"
-  git checkout "$OCC_COMMIT"
-  cd -
-else
-  echo "✅ OpenCASCADE already exists at $OCC_DIR"
-fi
-
 OCC_LIB_DIR="$OCC_INSTALL_DIR/lib"
+
+ensure_git_checkout "$OCC_REPO" "$OCC_COMMIT" "$OCC_DIR"
 
 mkdir -p "$OCC_BUILD_DIR"
 cd "$OCC_BUILD_DIR"
@@ -149,21 +176,10 @@ emmake ninja install
 
 cd -
 # === deal.II ===
-DEAL_II_COMMIT="0674a6cf7bf160eb634e37908173b59bb85af789"
 DEAL_II_DIR="dealii"
 DEAL_II_REPO="https://github.com/dealii/dealii.git"
 
-if [ ! -d "$DEAL_II_DIR" ]; then
-  echo "📥 Cloning deal.II at commit $DEAL_II_COMMIT..."
-  git init "$DEAL_II_DIR"
-  cd "$DEAL_II_DIR"
-  git remote add origin "$DEAL_II_REPO"
-  git fetch --depth=1 origin "$DEAL_II_COMMIT"
-  git checkout "$DEAL_II_COMMIT"
-  cd -
-else
-  echo "✅ deal.II already exists at $DEAL_II_DIR"
-fi
+ensure_git_checkout "$DEAL_II_REPO" "$DEAL_II_COMMIT" "$DEAL_II_DIR"
 
 # === Patches ===
 PATCH_FILE="$DEAL_II_DIR/cmake/modules/FindDEAL_II_OPENCASCADE.cmake"
@@ -213,7 +229,7 @@ cd "$WASM_BUILD_DIR"
 echo "🔍 Using native expand_instantiations: ${NATIVE_BUILD_DIR}/bin/expand_instantiations"
 file "${NATIVE_BUILD_DIR}/bin/expand_instantiations"
 
-OPENCASCADE_LIBRARIES=$(find "$OCC_INSTALL_DIR/lib" -name 'libTK*.a' -o -name 'libTKernel.a' | sort | tr '\n' ';')
+OPENCASCADE_LIBRARIES=$(find "$OCC_INSTALL_DIR/lib" -name 'libTK*.a' | sort | tr '\n' ';')
 
 # === Configure deal.II ===
 emcmake cmake "../$DEAL_II_DIR" \
@@ -255,46 +271,87 @@ export PATH="$PWD/../$NATIVE_BUILD_DIR/bin:$PATH"
 emmake ninja -j${THREADS}
 
 # === Boost ===
-BOOST_VERSION="1.84.0"
 BOOST_DIR="external/boost"
-BOOST_TARBALL="boost_1_84_0.tar.gz"
+BOOST_TARBALL="boost_${BOOST_VERSION//./_}.tar.gz" # Replace . with _
 BOOST_URL="https://archives.boost.io/release/${BOOST_VERSION}/source/${BOOST_TARBALL}"
+BOOST_JSON_URL="${BOOST_URL}.json"
+VERSION_HEADER="${BOOST_DIR}/boost/version.hpp"
 
-if [ ! -d "$BOOST_DIR" ]; then
+# Function to extract version from version.hpp
+get_boost_version() {
+  local header="$1"
+  if [ ! -f "$header" ]; then
+    echo ""
+    return
+  fi
+  local version_num
+  version_num=$(grep "#define BOOST_VERSION" "$header" | awk '{ print $3 }')
+  local major=$((version_num / 100000))
+  local minor=$(((version_num / 100) % 1000))
+  local patch=$((version_num % 100))
+  echo "${major}.${minor}.${patch}"
+}
+
+NEEDS_DOWNLOAD=1
+
+if [ -d "$BOOST_DIR/boost" ]; then
+  INSTALLED_VERSION=$(get_boost_version "$VERSION_HEADER")
+  if [ "$INSTALLED_VERSION" = "$BOOST_VERSION" ]; then
+    NEEDS_DOWNLOAD=0
+    echo "✅ Boost ${BOOST_VERSION} already exists at ${BOOST_DIR}"
+  else
+    echo "⚠️ Boost directory exists but version mismatch: found ${INSTALLED_VERSION}, expected ${BOOST_VERSION}"
+    echo "🧹 Removing old Boost directory..."
+    rm -rf "$BOOST_DIR"
+  fi
+fi
+
+if [ "$NEEDS_DOWNLOAD" -eq 1 ]; then
   echo "📦 Downloading Boost ${BOOST_VERSION}..."
   mkdir -p external
   wget -q --show-progress "$BOOST_URL" -O "external/${BOOST_TARBALL}" || curl -L "$BOOST_URL" -o "external/${BOOST_TARBALL}"
 
+  # Download and parse checksum
+  echo "🔐 Verifying checksum..."
+  CHECKSUM=$(curl -s "$BOOST_JSON_URL" | grep -o '"sha256": *"[^"]*"' | sed 's/.*"sha256": *"\([^"]*\)"/\1/')
+
+  if [ -z "$CHECKSUM" ]; then
+    echo "❌ Failed to retrieve checksum from JSON."
+    exit 1
+  fi
+
+  ACTUAL=$(sha256sum "external/${BOOST_TARBALL}" | awk '{ print $1 }')
+
+  if [ "$ACTUAL" != "$CHECKSUM" ]; then
+    echo "❌ Checksum verification failed!"
+    echo "Expected: $CHECKSUM"
+    echo "Actual:   $ACTUAL"
+    exit 1
+  else
+    echo "✅ Checksum verification passed."
+  fi
+
   echo "📦 Extracting Boost..."
   tar -xf "external/${BOOST_TARBALL}" -C external
-  mv "external/boost_1_84_0" "$BOOST_DIR"
-
+  mv "external/boost_${BOOST_VERSION//./_}" "$BOOST_DIR"
+  rm -f "external/${BOOST_TARBALL}"
+  
   echo "📦 Bootstrapping Boost headers..."
   cd "$BOOST_DIR"
   ./bootstrap.sh
   ./b2 headers
+  if [ $? -ne 0 ]; then
+    echo "❌ Boost header generation failed."
+    exit 1
+  fi
   cd -
-else
-  echo "✅ Boost already exists at $BOOST_DIR"
 fi
 
 # === Taskflow ===
 TASKFLOW_REPO="https://github.com/taskflow/taskflow.git"
-TASKFLOW_COMMIT="83591c4a5f55eb4f0d5760a508da34b7a11f71ee"
 TASKFLOW_DIR="external/taskflow"
 
-if [ ! -d "$TASKFLOW_DIR" ]; then
-  echo "📦 Cloning Taskflow at commit $TASKFLOW_COMMIT..."
-  mkdir -p "$(dirname "$TASKFLOW_DIR")"
-  git init "$TASKFLOW_DIR"
-  cd "$TASKFLOW_DIR"
-  git remote add origin "$TASKFLOW_REPO"
-  git fetch --depth=1 origin "$TASKFLOW_COMMIT"
-  git checkout "$TASKFLOW_COMMIT"
-  cd -
-else
-  echo "✅ Taskflow already exists at $TASKFLOW_DIR"
-fi
+ensure_git_checkout "$TASKFLOW_REPO" "$TASKFLOW_COMMIT" "$TASKFLOW_DIR"
 
 # === Minimal example ===
 cat > "${EXAMPLE_NAME}.cc" <<EOF
@@ -324,10 +381,9 @@ EOF
 
 # === Compile example to WebAssembly ===
 em++ -O1 "${EXAMPLE_NAME}.cc" ./lib/libdeal_II.a \
-  $(find "$OCC_INSTALL_DIR/lib" -name 'libTK*.a' -o -name 'libTKernel.a' | sort | xargs) \
+  $(find "$OCC_INSTALL_DIR/lib" -name 'libTK*.a' | sort | xargs) \
   "$INSTALL_DIR/kokkos/lib/libkokkoscontainers.a" \
   "$INSTALL_DIR/kokkos/lib/libkokkoscore.a" \
-  -sASSERTIONS=2 -sEXIT_RUNTIME=1 -sENVIRONMENT=web \
   -I../dealii/include \
   -I../dealii/bundled/taskflow-3.10.0 \
   -I./include \
@@ -337,6 +393,7 @@ em++ -O1 "${EXAMPLE_NAME}.cc" ./lib/libdeal_II.a \
   -I"$BOOST_DIR" \
   -I"$TASKFLOW_DIR" \
   -std=c++17 \
+  -sASSERTIONS=2 \
   -sINITIAL_MEMORY=2048MB \
   -sEXIT_RUNTIME=1 \
   -sENVIRONMENT=web,worker \
