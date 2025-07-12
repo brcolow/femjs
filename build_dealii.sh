@@ -1,6 +1,22 @@
 #!/bin/bash
 set -euo pipefail
 
+declare -A REPOS=(
+  ["KOKKOS"]="https://github.com/kokkos/kokkos.git"
+  ["OCC"]="https://git.dev.opencascade.org/repos/occt.git"
+  ["DEAL_II"]="https://github.com/dealii/dealii.git"
+  ["TASKFLOW"]="https://github.com/taskflow/taskflow.git"
+  ["VTK"]="https://github.com/Kitware/VTK.git"
+)
+
+declare -A CURRENT_HASHES=(
+  ["KOKKOS_COMMIT"]="3e7dfc68cc1fb371c345ef42cb0f0d97caee8b81"
+  ["OCC_COMMIT"]="22d437b771eb322dcceec3ad0efec6876721b8a9"
+  ["DEAL_II_COMMIT"]="0674a6cf7bf160eb634e37908173b59bb85af789"
+  ["TASKFLOW_COMMIT"]="83591c4a5f55eb4f0d5760a508da34b7a11f71ee"
+  ["VTK_COMMIT"]="1d0e7351b6b95fb74a65ee7ca6fe54870b0417a4"
+)
+
 if [[ "${1:-}" == "clean" || "${1:-}" == "--clean" || "${1:-}" == "-c" ]]; then
   echo "🧹 Cleaning build and dependency directories..."
   rm -rf external install dealii dealii_wasm_build native_build
@@ -8,11 +24,44 @@ if [[ "${1:-}" == "clean" || "${1:-}" == "--clean" || "${1:-}" == "-c" ]]; then
   exit 0
 fi
 
-# If you change the commit hash (or version) re-running the script will download new versions automatically.
-KOKKOS_COMMIT="3e7dfc68cc1fb371c345ef42cb0f0d97caee8b81"
-OCC_COMMIT="22d437b771eb322dcceec3ad0efec6876721b8a9"
-DEAL_II_COMMIT="0674a6cf7bf160eb634e37908173b59bb85af789"
-TASKFLOW_COMMIT="83591c4a5f55eb4f0d5760a508da34b7a11f71ee"
+if [[ "${1:-}" == "update" || "${1:-}" == "--update" || "${1:-}" == "-u" ]]; then
+  SCRIPT_FILE="${BASH_SOURCE[0]}"
+  TMP_SCRIPT="${SCRIPT_FILE}.tmp"
+  echo "🔍 Checking for newer commits..."
+
+  UPDATE_NEEDED=false
+  cp "$SCRIPT_FILE" "$TMP_SCRIPT"
+
+  for var in "${!CURRENT_HASHES[@]}"; do
+    repo_key="${var%_COMMIT}"
+    repo_url="${REPOS[$repo_key]}"
+    current_hash="${CURRENT_HASHES[$var]}"
+
+    # Get latest commit from default branch
+    latest_hash=$(git ls-remote "$repo_url" HEAD | awk '{print $1}')
+
+    if [[ "$current_hash" != "$latest_hash" ]]; then
+      echo "🆕 $repo_key: New commit available!"
+      echo "   Old: $current_hash"
+      echo "   New: $latest_hash"
+      sed -i "s|^$var=.*|$var=\"$latest_hash\"|" "$TMP_SCRIPT"
+      UPDATE_NEEDED=true
+    else
+      echo "✅ $repo_key: Up to date."
+    fi
+  done
+
+  # Replace the script if needed
+  if [ "$UPDATE_NEEDED" = true ]; then
+    mv "$TMP_SCRIPT" "$SCRIPT_FILE"
+    echo "✅ Script updated with latest commits."
+    exit 0
+  else
+    rm "$TMP_SCRIPT"
+  fi
+  exit 0
+fi
+
 BOOST_VERSION="1.84.0"
 
 ensure_git_checkout() {
@@ -37,7 +86,16 @@ ensure_git_checkout() {
 
   echo "📦 Cloning $repo_url at commit ${commit_hash:0:10}..."
   mkdir -p "$(dirname "$target_dir")"
+  
+  # Create a temporary global config to suppress hint paragraph about initial branch name.
+  temp_gitconfig=$(mktemp)
+  git config --file "$temp_gitconfig" init.defaultBranch master
+
+  export GIT_CONFIG_GLOBAL="$temp_gitconfig"
   git init "$target_dir"
+  unset GIT_CONFIG_GLOBAL
+  rm -f "$temp_gitconfig"
+  
   git -C "$target_dir" remote add origin "$repo_url"
   git -C "$target_dir" fetch --depth=1 origin "$commit_hash" --quiet
   git -C "$target_dir" checkout "$commit_hash" --quiet
@@ -80,6 +138,7 @@ NATIVE_BUILD_DIR="native_build"
 WASM_BUILD_DIR="dealii_wasm_build"
 EXAMPLE_NAME="minimal_dealii"
 THREADS=$(nproc)
+START_DIR=$(pwd)
 
 # === Setup Emscripten ===
 if [ ! -d "emsdk" ]; then
@@ -99,15 +158,46 @@ if [ -z "$CURRENT_VERSION" ] || [ "$CURRENT_VERSION" != "$LATEST_VERSION" ]; the
   ./emsdk activate latest
 fi
 
-cd ..
+cd "$START_DIR"
 source ./emsdk/emsdk_env.sh
 
+
+# === VTK ===
+VTK_DIR="external/vtk"
+VTK_BUILD_DIR="$VTK_DIR/build"
+VTK_INSTALL_DIR="$INSTALL_DIR/vtk"
+
+ensure_git_checkout "${REPOS[VTK]}" "${CURRENT_HASHES[VTK_COMMIT]}" "$VTK_DIR"
+
+mkdir -p "$VTK_BUILD_DIR"
+cd "$VTK_BUILD_DIR"
+
+echo "⚙️  Configuring VTK with Emscripten..."
+# https://github.com/Kitware/VTK/blob/master/Documentation/docs/advanced/build_wasm_emscripten.md?plain=1#L65
+emcmake cmake \
+  -S .. \
+  -B . \
+  -G "Ninja" \
+  -DCMAKE_INSTALL_PREFIX="$VTK_INSTALL_DIR" \
+  -DBUILD_SHARED_LIBS:BOOL=OFF \
+  -DVTK_ENABLE_LOGGING:BOOL=OFF \
+  -DVTK_WRAP_JAVASCRIPT:BOOL=ON \
+  -DVTK_WASM_OPTIMIZATION=LITTLE \
+  -DVTK_MODULE_ENABLE_VTK_hdf5:STRING=NO \
+  -DVTK_MODULE_ENABLE_VTK_RenderingContextOpenGL2:STRING=DONT_WANT \
+  -DVTK_MODULE_ENABLE_VTK_RenderingCellGrid:STRING=NO \
+  -DVTK_MODULE_ENABLE_VTK_sqlite:STRING=NO
+
+echo "🔨 Building VTK..."
+ninja -j${THREADS}
+ninja install
+cd "$START_DIR"
+
 # === Kokkos ===
-KOKKOS_REPO="https://github.com/kokkos/kokkos.git"
 KOKKOS_DIR="external/kokkos"
 KOKKOS_INSTALL_DIR="$INSTALL_DIR/kokkos"
 
-ensure_git_checkout "$KOKKOS_REPO" "$KOKKOS_COMMIT" "$KOKKOS_DIR"
+ensure_git_checkout "${REPOS[KOKKOS]}" "${CURRENT_HASHES[KOKKOS_COMMIT]}" "$KOKKOS_DIR"
 
 mkdir -p "$KOKKOS_DIR/build"
 cd "$KOKKOS_DIR/build"
@@ -124,7 +214,7 @@ emcmake cmake .. \
 
 ninja -j${THREADS}
 ninja install
-cd -
+cd "$START_DIR"
 
 if [ ! -f "$INSTALL_DIR/kokkos/lib/cmake/Kokkos/KokkosConfig.cmake" ]; then
   echo "❌ KokkosConfig.cmake not found. Kokkos install may have failed."
@@ -132,13 +222,12 @@ if [ ! -f "$INSTALL_DIR/kokkos/lib/cmake/Kokkos/KokkosConfig.cmake" ]; then
 fi
 
 # === OpenCASCADE ===
-OCC_REPO="https://git.dev.opencascade.org/repos/occt.git"
 OCC_DIR="external/opencascade"
 OCC_BUILD_DIR="$OCC_DIR/build"
 OCC_INSTALL_DIR="$INSTALL_DIR/opencascade"
 OCC_LIB_DIR="$OCC_INSTALL_DIR/lib"
 
-ensure_git_checkout "$OCC_REPO" "$OCC_COMMIT" "$OCC_DIR"
+ensure_git_checkout "${REPOS[OCC]}" "${CURRENT_HASHES[OCC_COMMIT]}" "$OCC_DIR"
 
 mkdir -p "$OCC_BUILD_DIR"
 cd "$OCC_BUILD_DIR"
@@ -168,18 +257,16 @@ cmake .. \
   -DUSE_OPENGL=OFF \
   -DUSE_XLIB=OFF \
   -DCXX_COMPILER_LAUNCHER="ccache" \
-  -G "Ninja"
 
 echo "🔨 Building OpenCASCADE..."
-emmake ninja -j${THREADS}
-emmake ninja install
+emmake make -j${THREADS}
+emmake make install
+cd "$START_DIR"
 
-cd -
 # === deal.II ===
 DEAL_II_DIR="dealii"
-DEAL_II_REPO="https://github.com/dealii/dealii.git"
 
-ensure_git_checkout "$DEAL_II_REPO" "$DEAL_II_COMMIT" "$DEAL_II_DIR"
+ensure_git_checkout ${REPOS[DEAL_II]} "${CURRENT_HASHES[DEAL_II_COMMIT]}" "$DEAL_II_DIR"
 
 # === Patches ===
 PATCH_FILE="$DEAL_II_DIR/cmake/modules/FindDEAL_II_OPENCASCADE.cmake"
@@ -253,7 +340,8 @@ emcmake cmake "../$DEAL_II_DIR" \
   -DDEAL_II_WITH_MUMPS=OFF \
   -DDEAL_II_WITH_SYMENGINE=OFF \
   -DDEAL_II_WITH_GSL=OFF \
-  -DDEAL_II_WITH_VTK=OFF \
+  -DDEAL_II_WITH_VTK=ON \
+  -DVTK_DIR="$VTK_INSTALL_DIR" \
   -DDEAL_II_WITH_ARBORX=OFF \
   -DDEAL_II_WITH_TBB=OFF \
   -DDEAL_II_WITH_KOKKOS=ON \
@@ -265,10 +353,11 @@ emcmake cmake "../$DEAL_II_DIR" \
   -DDEAL_II_USE_PRECOMPILED_INSTANCES=ON \
   -DEXPAND_INSTANTIATIONS_EXE="$PWD/../$NATIVE_BUILD_DIR/bin/expand_instantiations" \
   -DCXX_COMPILER_LAUNCHER="ccache" \
-  -G "Ninja"
 
 export PATH="$PWD/../$NATIVE_BUILD_DIR/bin:$PATH"
-emmake ninja -j${THREADS}
+pwd
+emmake make -j${THREADS}
+cd "$START_DIR"
 
 # === Boost ===
 BOOST_DIR="external/boost"
@@ -344,17 +433,16 @@ if [ "$NEEDS_DOWNLOAD" -eq 1 ]; then
     echo "❌ Boost header generation failed."
     exit 1
   fi
-  cd -
+  cd ..
 fi
 
 # === Taskflow ===
-TASKFLOW_REPO="https://github.com/taskflow/taskflow.git"
 TASKFLOW_DIR="external/taskflow"
 
-ensure_git_checkout "$TASKFLOW_REPO" "$TASKFLOW_COMMIT" "$TASKFLOW_DIR"
+ensure_git_checkout "${REPOS[TASKFLOW]}" "${CURRENT_HASHES[TASKFLOW_COMMIT]}" "$TASKFLOW_DIR"
 
 # === Minimal example ===
-cat > "${EXAMPLE_NAME}.cc" <<EOF
+cat > "$WASM_BUILD_DIR/${EXAMPLE_NAME}.cc" <<EOF
 #include <deal.II/base/point.h>
 #include <deal.II/opencascade/utilities.h>
 
@@ -379,19 +467,20 @@ int main()
 }
 EOF
 
+cd "$WASM_BUILD_DIR"
 # === Compile example to WebAssembly ===
 em++ -O1 "${EXAMPLE_NAME}.cc" ./lib/libdeal_II.a \
   $(find "$OCC_INSTALL_DIR/lib" -name 'libTK*.a' | sort | xargs) \
   "$INSTALL_DIR/kokkos/lib/libkokkoscontainers.a" \
   "$INSTALL_DIR/kokkos/lib/libkokkoscore.a" \
-  -I../dealii/include \
-  -I../dealii/bundled/taskflow-3.10.0 \
+  -I"$START_DIR/dealii/include" \
+  -I"$START_DIR/dealii/bundled/taskflow-3.10.0" \
   -I./include \
   -I"$INSTALL_DIR/kokkos/include" \
   -I"$INSTALL_DIR/opencascade/include/opencascade" \
   -I"$INSTALL_DIR/opencascade/include" \
-  -I"$BOOST_DIR" \
-  -I"$TASKFLOW_DIR" \
+  -I"$START_DIR/external/boost" \
+  -I"$START_DIR/external/taskflow" \
   -std=c++17 \
   -sASSERTIONS=2 \
   -sINITIAL_MEMORY=2048MB \
@@ -409,11 +498,11 @@ em++ -O1 "${EXAMPLE_NAME}.cc" ./lib/libdeal_II.a \
   -g \
   -o "${EXAMPLE_NAME}.html"
 
-cd ..
 echo ""
 echo "✅ Build complete."
 echo "📄 Output: ${WASM_BUILD_DIR}/${EXAMPLE_NAME}.html"
 echo "🌐 Serving built assets..."
+cd ..
 python3 serve.py
 if [ "$(systemd-detect-virt)" = "wsl" ]; then
   cmd.exe /C start http://localhost:8000/dealii_wasm_build/minimal_dealii.html
