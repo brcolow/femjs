@@ -521,7 +521,7 @@ echo "✅ Build complete."
 echo "📄 Output: ${WASM_BUILD_DIR}/${EXAMPLE_NAME}.html"
 echo "🌐 Serving built assets..."
 cd ..
-python3 serve.py
+python3 serve.py > /dev/null 2>&1 &
 if [ "$(systemd-detect-virt)" = "wsl" ]; then
   cmd.exe /C start http://localhost:8000/dealii_wasm_build/minimal_dealii.html
 else
