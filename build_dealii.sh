@@ -186,7 +186,12 @@ emcmake cmake \
   -DVTK_MODULE_ENABLE_VTK_hdf5:STRING=NO \
   -DVTK_MODULE_ENABLE_VTK_RenderingContextOpenGL2:STRING=DONT_WANT \
   -DVTK_MODULE_ENABLE_VTK_RenderingCellGrid:STRING=NO \
-  -DVTK_MODULE_ENABLE_VTK_sqlite:STRING=NO
+  -DVTK_MODULE_ENABLE_VTK_sqlite:STRING=NO \
+  -DCMAKE_C_FLAGS="-matomics -mbulk-memory -fwasm-exceptions" \
+  -DCMAKE_CXX_FLAGS="-matomics -mbulk-memory -fwasm-exceptions" \
+  -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+  -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+  -DCMAKE_BUILD_TYPE=Release
 
 echo "🔨 Building VTK..."
 ninja -j${THREADS}
@@ -209,7 +214,9 @@ emcmake cmake .. \
   -DBUILD_SHARED_LIBS=OFF \
   -DKOKKOS_IMPL_32BIT=ON \
   -DKokkos_ENABLE_DEPRECATED_CODE=OFF \
-  -DCMAKE_CXX_FLAGS="-DKOKKOS_IMPL_32BIT -pthread -matomics -mbulk-memory" \
+  -DCMAKE_CXX_FLAGS="-DKOKKOS_IMPL_32BIT -pthread -matomics -mbulk-memory -fwasm-exceptions" \
+  -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+  -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
   -G "Ninja"
 
 ninja -j${THREADS}
@@ -238,8 +245,8 @@ cmake .. \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX="$OCC_INSTALL_DIR" \
   -DBUILD_MODULE_ApplicationFramework=OFF \
-  -DCMAKE_C_FLAGS="-sUSE_PTHREADS=1 -matomics -mbulk-memory" \
-  -DCMAKE_CXX_FLAGS="-sUSE_PTHREADS=1 -matomics -mbulk-memory" \
+  -DCMAKE_C_FLAGS="-sUSE_PTHREADS=1 -matomics -mbulk-memory -fwasm-exceptions" \
+  -DCMAKE_CXX_FLAGS="-sUSE_PTHREADS=1 -matomics -mbulk-memory -fwasm-exceptions" \
   -DBUILD_MODULE_Draw=OFF \
   -DBUILD_MODULE_Visualization=OFF \
   -DBUILD_MODULE_Inspection=OFF \
@@ -256,7 +263,8 @@ cmake .. \
   -DUSE_GL2PS=OFF \
   -DUSE_OPENGL=OFF \
   -DUSE_XLIB=OFF \
-  -DCXX_COMPILER_LAUNCHER="ccache" \
+  -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+  -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
 
 echo "🔨 Building OpenCASCADE..."
 emmake make -j${THREADS}
@@ -348,11 +356,12 @@ emcmake cmake "../$DEAL_II_DIR" \
   -DKOKKOS_DIR="$KOKKOS_INSTALL_DIR/lib/cmake/Kokkos" \
   -DDEAL_II_FORCE_BUNDLED_TASKFLOW=ON \
   -DDEAL_II_TASKFLOW_BACKEND=Pool \
-  -DCMAKE_CXX_FLAGS="-pthread -sUSE_PTHREADS=1 -DKOKKOS_IMPL_32BIT" \
+  -DCMAKE_CXX_FLAGS="-pthread -sUSE_PTHREADS=1 -DKOKKOS_IMPL_32BIT -fwasm-exceptions" \
   -DDEAL_II_BUILD_EXPAND_INSTANTIATIONS=OFF \
   -DDEAL_II_USE_PRECOMPILED_INSTANCES=ON \
   -DEXPAND_INSTANTIATIONS_EXE="$PWD/../$NATIVE_BUILD_DIR/bin/expand_instantiations" \
-  -DCXX_COMPILER_LAUNCHER="ccache" \
+  -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+  -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
 
 export PATH="$PWD/../$NATIVE_BUILD_DIR/bin:$PATH"
 pwd
@@ -445,6 +454,7 @@ ensure_git_checkout "${REPOS[TASKFLOW]}" "${CURRENT_HASHES[TASKFLOW_COMMIT]}" "$
 cat > "$WASM_BUILD_DIR/${EXAMPLE_NAME}.cc" <<EOF
 #include <deal.II/base/point.h>
 #include <deal.II/opencascade/utilities.h>
+#include <deal.II/vtk/utilities.h>
 
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <iostream>
@@ -463,6 +473,11 @@ int main()
   std::cout << "Query point:   " << query << "\n";
   std::cout << "Closest point: " << closest << "\n";
 
+  auto vtk_array = VTKWrappers::dealii_point_to_vtk_array(query);
+  std::cout << "✅ VTK array created from Point<3>: ";
+  for (int i = 0; i < vtk_array->GetNumberOfComponents(); ++i)
+    std::cout << vtk_array->GetComponent(0, i) << " ";
+  std::cout << "\n";
   return 0;
 }
 EOF
@@ -471,6 +486,7 @@ cd "$WASM_BUILD_DIR"
 # === Compile example to WebAssembly ===
 em++ -O1 "${EXAMPLE_NAME}.cc" ./lib/libdeal_II.a \
   $(find "$OCC_INSTALL_DIR/lib" -name 'libTK*.a' | sort | xargs) \
+  $(find "$VTK_INSTALL_DIR/lib" -name 'libvtk*.a' | sort | xargs) \
   "$INSTALL_DIR/kokkos/lib/libkokkoscontainers.a" \
   "$INSTALL_DIR/kokkos/lib/libkokkoscore.a" \
   -I"$START_DIR/dealii/include" \
@@ -479,6 +495,7 @@ em++ -O1 "${EXAMPLE_NAME}.cc" ./lib/libdeal_II.a \
   -I"$INSTALL_DIR/kokkos/include" \
   -I"$INSTALL_DIR/opencascade/include/opencascade" \
   -I"$INSTALL_DIR/opencascade/include" \
+  -I"$INSTALL_DIR/vtk/include/vtk-9.5" \
   -I"$START_DIR/external/boost" \
   -I"$START_DIR/external/taskflow" \
   -std=c++17 \
@@ -489,6 +506,7 @@ em++ -O1 "${EXAMPLE_NAME}.cc" ./lib/libdeal_II.a \
   -sERROR_ON_UNDEFINED_SYMBOLS=1 \
   -sEXPORTED_FUNCTIONS=_main \
   -sEXPORTED_RUNTIME_METHODS=ccall,cwrap \
+  -fwasm-exceptions \
   -sUSE_PTHREADS=1 \
   -pthread \
   -sPTHREAD_POOL_SIZE=4 \
