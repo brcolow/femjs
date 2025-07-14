@@ -458,10 +458,15 @@ cat > "$WASM_BUILD_DIR/${EXAMPLE_NAME}.cc" <<EOF
 
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <iostream>
+#include <string>
 
 int main()
 {
   using namespace dealii;
+  const std::string cad_file_name = "/res/h_press.stl";
+  TopoDS_Shape model_shape = OpenCASCADE::read_STL(cad_file_name);
+  std::cout << " Read " << cad_file_name << std::endl;
+  const double tolerance = OpenCASCADE::get_shape_tolerance(model_shape) * 5;
 
   TopoDS_Shape shape = BRepPrimAPI_MakeBox(1.0, 1.0, 1.0).Shape();
   std::cout << "✅ OCC shape created.\n";
@@ -484,7 +489,9 @@ EOF
 
 cd "$WASM_BUILD_DIR"
 # === Compile example to WebAssembly ===
-em++ -O1 "${EXAMPLE_NAME}.cc" ./lib/libdeal_II.a \
+em++ -O1 "${EXAMPLE_NAME}.cc" \
+  --preload-file ../res \
+ ./lib/libdeal_II.a \
   $(find "$OCC_INSTALL_DIR/lib" -name 'libTK*.a' | sort | xargs) \
   $(find "$VTK_INSTALL_DIR/lib" -name 'libvtk*.a' | sort | xargs) \
   "$INSTALL_DIR/kokkos/lib/libkokkoscontainers.a" \
@@ -521,9 +528,31 @@ echo "✅ Build complete."
 echo "📄 Output: ${WASM_BUILD_DIR}/${EXAMPLE_NAME}.html"
 echo "🌐 Serving built assets..."
 cd ..
+
+# Start the server in the background
 python3 serve.py > /dev/null 2>&1 &
+server_pid=$!
+
+# Ensure cleanup on exit
+trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+
+# Wait for the server to become available
+echo "⏳ Waiting for server on http://localhost:8000..."
+for i in {1..50}; do
+  if curl -s --head http://localhost:8000/ | grep -q "200 OK"; then
+    echo "✅ Server is up!"
+    break
+  fi
+  sleep 0.1
+done
+
+# Launch browser
+url="http://localhost:8000/dealii_wasm_build/minimal_dealii.html"
 if [ "$(systemd-detect-virt)" = "wsl" ]; then
-  cmd.exe /C start http://localhost:8000/dealii_wasm_build/minimal_dealii.html
+  powershell.exe /C "Start-Process $url"
 else
-  xdg-open http://localhost:8000/dealii_wasm_build/minimal_dealii.html
+  xdg-open "$url"
 fi
+
+# Wait for manual Ctrl+C to exit
+wait "$server_pid"
