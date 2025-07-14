@@ -1,0 +1,7 @@
+install/
+external/
+dealii/
+dealii_wasm_build/
+emsdk/
+native_build/
+minimal_dealii.cc
