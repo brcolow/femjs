@@ -151,7 +151,8 @@ git pull --quiet
 
 # Extract latest upstream tag from local JSON
 LATEST_VERSION=$(jq -r '.aliases.latest' emscripten-releases-tags.json)
-CURRENT_VERSION=$(./emsdk list | grep -E '^\s*\*' | awk '{print $2}')
+# CURRENT_VERSION=$(./emsdk list | grep -E '^\s*\*' | awk '{print $2}')
+CURRENT_VERSION=$(./emsdk list | grep 'INSTALLED' | awk '{print $1}' | head -n 1)
 
 if [ -z "$CURRENT_VERSION" ] || [ "$CURRENT_VERSION" != "$LATEST_VERSION" ]; then
   ./emsdk install latest
@@ -160,7 +161,6 @@ fi
 
 cd "$START_DIR"
 source ./emsdk/emsdk_env.sh
-
 
 # === VTK ===
 VTK_DIR="external/vtk"
@@ -326,6 +326,19 @@ file "${NATIVE_BUILD_DIR}/bin/expand_instantiations"
 
 OPENCASCADE_LIBRARIES=$(find "$OCC_INSTALL_DIR/lib" -name 'libTK*.a' | sort | tr '\n' ';')
 
+# VTK 9.2+ no longer installs VTKConfig.cmake, only vtk-config.cmake.
+# deal.II expects VTKConfig.cmake, so we create a symlink for compatibility.
+VTK_CMAKE_DIR=$(find "$VTK_INSTALL_DIR/lib/cmake" -maxdepth 1 -type d -name "vtk-*" | head -n 1)
+if [ -z "$VTK_CMAKE_DIR" ]; then
+  echo "❌ Could not locate vtk-* CMake directory in $VTK_INSTALL_DIR/lib/cmake"
+  exit 1
+fi
+if [ ! -f "$VTK_CMAKE_DIR/VTKConfig.cmake" ]; then
+  echo "🔗 Creating VTKConfig.cmake → vtk-config.cmake symlink for deal.II compatibility"
+  ln -sf vtk-config.cmake "$VTK_CMAKE_DIR/VTKConfig.cmake"
+fi
+VTK_DIR="$VTK_CMAKE_DIR"
+
 # === Configure deal.II ===
 emcmake cmake "../$DEAL_II_DIR" \
   -DCMAKE_BUILD_TYPE=Release \
@@ -349,7 +362,7 @@ emcmake cmake "../$DEAL_II_DIR" \
   -DDEAL_II_WITH_SYMENGINE=OFF \
   -DDEAL_II_WITH_GSL=OFF \
   -DDEAL_II_WITH_VTK=ON \
-  -DVTK_DIR="$VTK_INSTALL_DIR" \
+  -DVTK_DIR="$VTK_DIR" \
   -DDEAL_II_WITH_ARBORX=OFF \
   -DDEAL_II_WITH_TBB=OFF \
   -DDEAL_II_WITH_KOKKOS=ON \
@@ -518,6 +531,8 @@ em++ -O1 "${EXAMPLE_NAME}.cc" \
   -pthread \
   -sPTHREAD_POOL_SIZE=4 \
   -sPROXY_TO_PTHREAD=1 \
+  -sMODULARIZE=1 \
+  -sEXPORT_ES6=1 \
   -gsource-map \
   --source-map-base "http://127.0.0.1:8000/" \
   -g \
