@@ -504,6 +504,7 @@ cd "$WASM_BUILD_DIR"
 # === Compile example to WebAssembly ===
 em++ -O1 "${EXAMPLE_NAME}.cc" \
   --preload-file ../res \
+  --shell-file ../shell.html \
  ./lib/libdeal_II.a \
   $(find "$OCC_INSTALL_DIR/lib" -name 'libTK*.a' | sort | xargs) \
   $(find "$VTK_INSTALL_DIR/lib" -name 'libvtk*.a' | sort | xargs) \
