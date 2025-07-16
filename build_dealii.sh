@@ -475,11 +475,10 @@ cat > "$WASM_BUILD_DIR/${EXAMPLE_NAME}.cc" <<EOF
 #include <vtkActor.h>
 #include <vtkConeSource.h>
 #include <vtkPolyDataMapper.h>
+#include <vtkProperty.h>
 #include <vtkRenderer.h>
 #include <vtkRenderWindow.h>
 #include <vtkRenderWindowInteractor.h>
-#include <vtkWebAssemblyRenderWindowInteractor.h>
-#include <vtkWebAssemblyOpenGLRenderWindow.h>
 
 #include <iostream>
 #include <string>
@@ -508,27 +507,36 @@ int main()
     std::cout << vtk_array->GetComponent(0, i) << " ";
 
   // Create VTK rendering pipeline
-  vtkNew<vtkConeSource> cone;
+  vtkNew<vtkConeSource> coneSrc;
+  coneSrc->SetResolution(10);
+  coneSrc->SetCenter(0, 0, 0);
+  coneSrc->Update();
+  vtkPolyData *cone = coneSrc->GetOutput();
+
   vtkNew<vtkPolyDataMapper> mapper;
-  mapper->SetInputConnection(cone->GetOutputPort());
+  mapper->SetInputData(cone);
 
   vtkNew<vtkActor> actor;
   actor->SetMapper(mapper);
+  actor->GetProperty()->SetEdgeVisibility(1);
+  actor->GetProperty()->SetEdgeColor(1.0, 1.0, 1.0);
 
   vtkNew<vtkRenderer> renderer;
   renderer->AddActor(actor);
   renderer->SetBackground(0.1, 0.2, 0.4);
 
-  // WebAssembly-specific render window
-  vtkNew<vtkWebAssemblyOpenGLRenderWindow> renderWindow;
-  // renderWindow->AddRenderer(renderer);
-  // renderWindow->SetSize(800, 600); // or match canvas
-
   // Setup interactor
-  // vtkNew<vtkWebAssemblyRenderWindowInteractor> interactor;
+  vtkNew<vtkRenderWindowInteractor> interactor;
+
+  vtkNew<vtkRenderWindow> renderWindow;
+  renderWindow->AddRenderer(renderer);
+  renderWindow->SetSize(800, 600); // or match canvas
+  renderWindow->SetInteractor(interactor);
+  renderWindow->Render();
+
   // interactor->SetRenderWindow(renderWindow);
-  // interactor->Initialize();
-  // interactor->Start();
+  interactor->Initialize();
+  interactor->Start();
   return 0;
 }
 EOF
@@ -557,7 +565,7 @@ em++ -O1 "${EXAMPLE_NAME}.cc" \
   -sASSERTIONS=2 \
   -sINITIAL_MEMORY=1024MB \
   -sEXIT_RUNTIME=1 \
-  -sENVIRONMENT=web,worker \
+  -sENVIRONMENT=web \
   -sERROR_ON_UNDEFINED_SYMBOLS=1 \
   -sEXPORTED_FUNCTIONS=_main \
   -sEXPORTED_RUNTIME_METHODS=ccall,cwrap \
@@ -572,6 +580,7 @@ em++ -O1 "${EXAMPLE_NAME}.cc" \
   -sFULL_ES3=1 \
   -sUSE_WEBGL2=1 \
   -sDEFAULT_LIBRARY_FUNCS_TO_INCLUDE=['emscripten_webgl_create_context','emscripten_webgl_make_context_current','emscripten_webgl_destroy_context','emscripten_webgl_get_current_context'] \
+  -sEXPORTED_RUNTIME_METHODS=requestFullscreen \
   -gsource-map \
   --source-map-base "http://127.0.0.1:8000/$WASM_BUILD_DIR/" \
   -g \
