@@ -187,6 +187,8 @@ emcmake cmake \
   -DVTK_MODULE_ENABLE_VTK_RenderingContextOpenGL2:STRING=DONT_WANT \
   -DVTK_MODULE_ENABLE_VTK_RenderingCellGrid:STRING=NO \
   -DVTK_MODULE_ENABLE_VTK_sqlite:STRING=NO \
+  -DVTK_MODULE_ENABLE_VTK_WebAssemblyObjectFactory:STRING=YES \
+  -DVTK_MODULE_ENABLE_VTK_RenderingUIWebAssembly:STRING=YES \
   -DVTK_BUILD_TESTING=OFF \
   -DVTK_BUILD_EXAMPLES=OFF \
   -DCMAKE_C_FLAGS="-matomics -mbulk-memory -fwasm-exceptions" \
@@ -465,6 +467,7 @@ TASKFLOW_DIR="external/taskflow"
 
 ensure_git_checkout "${REPOS[TASKFLOW]}" "${CURRENT_HASHES[TASKFLOW_COMMIT]}" "$TASKFLOW_DIR"
 
+mkdir -p "$WASM_BUILD_DIR"
 # === Minimal example ===
 cat > "$WASM_BUILD_DIR/${EXAMPLE_NAME}.cc" <<EOF
 #include <BRepPrimAPI_MakeBox.hxx>
@@ -477,8 +480,8 @@ cat > "$WASM_BUILD_DIR/${EXAMPLE_NAME}.cc" <<EOF
 #include <vtkPolyDataMapper.h>
 #include <vtkProperty.h>
 #include <vtkRenderer.h>
-#include <vtkRenderWindow.h>
-#include <vtkRenderWindowInteractor.h>
+#include <vtkWebAssemblyOpenGLRenderWindow.h>
+#include <vtkWebAssemblyRenderWindowInteractor.h>
 
 #include <iostream>
 #include <string>
@@ -505,6 +508,7 @@ int main()
   std::cout << "✅ VTK array created from Point<3>: ";
   for (int i = 0; i < vtk_array->GetNumberOfComponents(); ++i)
     std::cout << vtk_array->GetComponent(0, i) << " ";
+  std::cout << std::endl;
 
   // Create VTK rendering pipeline
   vtkNew<vtkConeSource> coneSrc;
@@ -523,20 +527,23 @@ int main()
 
   vtkNew<vtkRenderer> renderer;
   renderer->AddActor(actor);
-  renderer->SetBackground(0.1, 0.2, 0.4);
+  renderer->SetBackground(1.0, 0.0, 0.0);
 
-  // Setup interactor
-  vtkNew<vtkRenderWindowInteractor> interactor;
+  vtkNew<vtkWebAssemblyOpenGLRenderWindow> renderWindow;
+  vtkNew<vtkWebAssemblyRenderWindowInteractor> interactor;
 
-  vtkNew<vtkRenderWindow> renderWindow;
-  renderWindow->AddRenderer(renderer);
-  renderWindow->SetSize(800, 600); // or match canvas
+  renderWindow->SetCanvasSelector("#canvas");
+  interactor->SetCanvasSelector("#canvas");
+  
+  interactor->SetRenderWindow(renderWindow);
   renderWindow->SetInteractor(interactor);
-  renderWindow->Render();
 
-  // interactor->SetRenderWindow(renderWindow);
-  interactor->Initialize();
+  renderWindow->AddRenderer(renderer);
+  renderWindow->SetSize(800, 600);
+  interactor->SetSize(800, 600);
+
   interactor->Start();
+
   return 0;
 }
 EOF
@@ -547,7 +554,7 @@ em++ -O1 "${EXAMPLE_NAME}.cc" \
   --preload-file ../res \
   --shell-file ../shell.html \
   --js-library "$VTK_INSTALL_DIR/lib/vtkWebAssemblyRenderWindowInteractor.js" \
- ./lib/libdeal_II.a \
+  ./lib/libdeal_II.a \
   $(find "$OCC_INSTALL_DIR/lib" -name 'libTK*.a' | sort | xargs) \
   $(find "$VTK_INSTALL_DIR/lib" -name 'libvtk*.a' | sort | xargs) \
   "$INSTALL_DIR/kokkos/lib/libkokkoscontainers.a" \
@@ -567,18 +574,19 @@ em++ -O1 "${EXAMPLE_NAME}.cc" \
   -sEXIT_RUNTIME=1 \
   -sENVIRONMENT=web \
   -sERROR_ON_UNDEFINED_SYMBOLS=1 \
-  -sEXPORTED_FUNCTIONS=_main \
+  -sEXPORTED_FUNCTIONS=_main,_emscripten_webgl_create_context,_emscripten_webgl_make_context_current,_emscripten_webgl_get_current_context \
   -sEXPORTED_RUNTIME_METHODS=ccall,cwrap \
   -fwasm-exceptions \
   -sUSE_PTHREADS=1 \
   -pthread \
   -sPTHREAD_POOL_SIZE=10 \
   -sPROXY_TO_PTHREAD=1 \
-  -sOFFSCREENCANVAS_SUPPORT=1 \
   -sMODULARIZE=1 \
   -sEXPORT_ES6=1 \
   -sFULL_ES3=1 \
   -sUSE_WEBGL2=1 \
+  -sOFFSCREENCANVAS_SUPPORT=1 \
+  -sOFFSCREEN_FRAMEBUFFER=1 \
   -sDEFAULT_LIBRARY_FUNCS_TO_INCLUDE=['emscripten_webgl_create_context','emscripten_webgl_make_context_current','emscripten_webgl_destroy_context','emscripten_webgl_get_current_context'] \
   -sEXPORTED_RUNTIME_METHODS=requestFullscreen \
   -gsource-map \
