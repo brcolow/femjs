@@ -187,8 +187,6 @@ emcmake cmake \
   -DVTK_MODULE_ENABLE_VTK_RenderingContextOpenGL2:STRING=DONT_WANT \
   -DVTK_MODULE_ENABLE_VTK_RenderingCellGrid:STRING=NO \
   -DVTK_MODULE_ENABLE_VTK_sqlite:STRING=NO \
-  -DVTK_MODULE_ENABLE_VTK_WebAssemblyObjectFactory:STRING=YES \
-  -DVTK_MODULE_ENABLE_VTK_RenderingUIWebAssembly:STRING=YES \
   -DVTK_BUILD_TESTING=OFF \
   -DVTK_BUILD_EXAMPLES=OFF \
   -DCMAKE_C_FLAGS="-matomics -mbulk-memory -fwasm-exceptions" \
@@ -510,6 +508,8 @@ int main()
     std::cout << vtk_array->GetComponent(0, i) << " ";
   std::cout << std::endl;
 
+  // https://github.com/Kitware/vtk-wasm/tree/87fbbd58d6cce5a4723bbe7934f32191625251c2/examples/cpp/cone
+
   // Create VTK rendering pipeline
   vtkNew<vtkConeSource> coneSrc;
   coneSrc->SetResolution(10);
@@ -532,23 +532,27 @@ int main()
   vtkNew<vtkWebAssemblyOpenGLRenderWindow> renderWindow;
   vtkNew<vtkWebAssemblyRenderWindowInteractor> interactor;
 
+
   renderWindow->SetCanvasSelector("#canvas");
   interactor->SetCanvasSelector("#canvas");
-  
+
   interactor->SetRenderWindow(renderWindow);
   renderWindow->SetInteractor(interactor);
 
   renderWindow->AddRenderer(renderer);
   renderWindow->SetSize(800, 600);
   interactor->SetSize(800, 600);
-
+  renderWindow->Render();
+  /*
+  // Error is on this line.
   interactor->Start();
-
+  */
   return 0;
 }
 EOF
 
 cd "$WASM_BUILD_DIR"
+pwd
 # === Compile example to WebAssembly ===
 em++ -O1 "${EXAMPLE_NAME}.cc" \
   --preload-file ../res \
