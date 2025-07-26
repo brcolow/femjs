@@ -171,6 +171,7 @@ ensure_git_checkout "${REPOS[VTK]}" "${CURRENT_HASHES[VTK_COMMIT]}" "$VTK_DIR"
 
 mkdir -p "$VTK_BUILD_DIR"
 cd "$VTK_BUILD_DIR"
+export EMCC_DEBUG=2
 
 echo "⚙️  Configuring VTK with Emscripten..."
 # https://github.com/Kitware/VTK/blob/master/Documentation/docs/advanced/build_wasm_emscripten.md?plain=1#L65
@@ -180,17 +181,17 @@ emcmake cmake \
   -G "Ninja" \
   -DCMAKE_INSTALL_PREFIX="$VTK_INSTALL_DIR" \
   -DBUILD_SHARED_LIBS:BOOL=OFF \
-  -DVTK_ENABLE_LOGGING:BOOL=OFF \
-  -DVTK_WRAP_JAVASCRIPT:BOOL=ON \
-  -DVTK_WASM_OPTIMIZATION=LITTLE \
+  -DVTK_ENABLE_LOGGING:BOOL=ON \
+  -DVTK_WRAP_JAVASCRIPT:BOOL=OFF \
+  -DVTK_WEBASSEMBLY_THREADS=ON \
   -DVTK_MODULE_ENABLE_VTK_hdf5:STRING=NO \
   -DVTK_MODULE_ENABLE_VTK_RenderingContextOpenGL2:STRING=DONT_WANT \
   -DVTK_MODULE_ENABLE_VTK_RenderingCellGrid:STRING=NO \
   -DVTK_MODULE_ENABLE_VTK_sqlite:STRING=NO \
   -DVTK_BUILD_TESTING=OFF \
   -DVTK_BUILD_EXAMPLES=OFF \
-  -DCMAKE_C_FLAGS="-matomics -mbulk-memory -fwasm-exceptions" \
-  -DCMAKE_CXX_FLAGS="-matomics -mbulk-memory -fwasm-exceptions" \
+  -DCMAKE_C_FLAGS="-pthread -matomics -mbulk-memory -fwasm-exceptions -sOFFSCREEN_FRAMEBUFFER=1" \
+  -DCMAKE_CXX_FLAGS="-pthread -matomics -mbulk-memory -fwasm-exceptions -sOFFSCREEN_FRAMEBUFFER=1" \
   -DCMAKE_C_COMPILER_LAUNCHER=ccache \
   -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
   -DCMAKE_BUILD_TYPE=Release
@@ -247,8 +248,8 @@ cmake .. \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX="$OCC_INSTALL_DIR" \
   -DBUILD_MODULE_ApplicationFramework=OFF \
-  -DCMAKE_C_FLAGS="-sUSE_PTHREADS=1 -matomics -mbulk-memory -fwasm-exceptions" \
-  -DCMAKE_CXX_FLAGS="-sUSE_PTHREADS=1 -matomics -mbulk-memory -fwasm-exceptions" \
+  -DCMAKE_C_FLAGS="-pthread -matomics -mbulk-memory -fwasm-exceptions" \
+  -DCMAKE_CXX_FLAGS="-pthread -matomics -mbulk-memory -fwasm-exceptions" \
   -DBUILD_MODULE_Draw=OFF \
   -DBUILD_MODULE_Visualization=OFF \
   -DBUILD_MODULE_Inspection=OFF \
@@ -371,7 +372,8 @@ emcmake cmake "../$DEAL_II_DIR" \
   -DKOKKOS_DIR="$KOKKOS_INSTALL_DIR/lib/cmake/Kokkos" \
   -DDEAL_II_FORCE_BUNDLED_TASKFLOW=ON \
   -DDEAL_II_TASKFLOW_BACKEND=Pool \
-  -DCMAKE_CXX_FLAGS="-pthread -sUSE_PTHREADS=1 -DKOKKOS_IMPL_32BIT -fwasm-exceptions" \
+  -DCMAKE_C_FLAGS="-pthread -DKOKKOS_IMPL_32BIT -fwasm-exceptions" \
+  -DCMAKE_CXX_FLAGS="-pthread -DKOKKOS_IMPL_32BIT -fwasm-exceptions" \
   -DDEAL_II_BUILD_EXPAND_INSTANTIATIONS=OFF \
   -DDEAL_II_USE_PRECOMPILED_INSTANCES=ON \
   -DEXPAND_INSTANTIATIONS_EXE="$PWD/../$NATIVE_BUILD_DIR/bin/expand_instantiations" \
@@ -461,6 +463,7 @@ if [ "$NEEDS_DOWNLOAD" -eq 1 ]; then
 fi
 
 # === Taskflow ===
+cd "$START_DIR"
 TASKFLOW_DIR="external/taskflow"
 
 ensure_git_checkout "${REPOS[TASKFLOW]}" "${CURRENT_HASHES[TASKFLOW_COMMIT]}" "$TASKFLOW_DIR"
@@ -469,6 +472,8 @@ mkdir -p "$WASM_BUILD_DIR"
 # === Minimal example ===
 cat > "$WASM_BUILD_DIR/${EXAMPLE_NAME}.cc" <<EOF
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <emscripten/emscripten.h>
+#include <emscripten/html5.h>
 #include <deal.II/base/point.h>
 #include <deal.II/opencascade/utilities.h>
 #include <deal.II/vtk/utilities.h>
@@ -483,6 +488,13 @@ cat > "$WASM_BUILD_DIR/${EXAMPLE_NAME}.cc" <<EOF
 
 #include <iostream>
 #include <string>
+
+extern "C" EMSCRIPTEN_KEEPALIVE
+void spinOnce(void *arg)
+{
+  auto *iren = static_cast<vtkWebAssemblyRenderWindowInteractor *>(arg);
+  iren->ProcessEvents();
+}
 
 int main()
 {
@@ -543,14 +555,12 @@ int main()
   renderWindow->SetSize(800, 600);
   interactor->SetSize(800, 600);
   renderWindow->Render();
-  /*
   // Error is on this line.
   interactor->Start();
-  */
   return 0;
 }
 EOF
-
+cd "$START_DIR"
 cd "$WASM_BUILD_DIR"
 pwd
 # === Compile example to WebAssembly ===
@@ -561,8 +571,6 @@ em++ -O1 "${EXAMPLE_NAME}.cc" \
   ./lib/libdeal_II.a \
   $(find "$OCC_INSTALL_DIR/lib" -name 'libTK*.a' | sort | xargs) \
   $(find "$VTK_INSTALL_DIR/lib" -name 'libvtk*.a' | sort | xargs) \
-  "$INSTALL_DIR/kokkos/lib/libkokkoscontainers.a" \
-  "$INSTALL_DIR/kokkos/lib/libkokkoscore.a" \
   -I"$START_DIR/dealii/include" \
   -I"$START_DIR/dealii/bundled/taskflow-3.10.0" \
   -I./include \
@@ -578,21 +586,27 @@ em++ -O1 "${EXAMPLE_NAME}.cc" \
   -sEXIT_RUNTIME=1 \
   -sENVIRONMENT=web \
   -sERROR_ON_UNDEFINED_SYMBOLS=1 \
-  -sEXPORTED_FUNCTIONS=_main,_emscripten_webgl_create_context,_emscripten_webgl_make_context_current,_emscripten_webgl_get_current_context \
-  -sEXPORTED_RUNTIME_METHODS=ccall,cwrap \
+  -sEXPORTED_FUNCTIONS=_main,_spinOnce,_emscripten_webgl_create_context,_emscripten_webgl_get_current_context,_emscripten_webgl_make_context_current \
+  -sEXPORTED_RUNTIME_METHODS=ccall,cwrap,requestFullscreen \
+  -sLLD_REPORT_UNDEFINED \
   -fwasm-exceptions \
-  -sUSE_PTHREADS=1 \
   -pthread \
-  -sPTHREAD_POOL_SIZE=10 \
-  -sPROXY_TO_PTHREAD=1 \
-  -sMODULARIZE=1 \
-  -sEXPORT_ES6=1 \
-  -sFULL_ES3=1 \
-  -sUSE_WEBGL2=1 \
-  -sOFFSCREENCANVAS_SUPPORT=1 \
+  -sPROXY_TO_PTHREAD \
   -sOFFSCREEN_FRAMEBUFFER=1 \
-  -sDEFAULT_LIBRARY_FUNCS_TO_INCLUDE=['emscripten_webgl_create_context','emscripten_webgl_make_context_current','emscripten_webgl_destroy_context','emscripten_webgl_get_current_context'] \
-  -sEXPORTED_RUNTIME_METHODS=requestFullscreen \
+  -sJSPI \
+  -sPTHREAD_POOL_SIZE=10 \
+  -sMODULARIZE=1 \
+  -sEXPORT_NAME="createModule" \
+  -sEXPORT_ES6=1 \
+  -sFULL_ES2=1 \
+  -sFULL_ES3=1 \
+  -sMAX_WEBGL_VERSION=2 \
+  -sGL_ASSERTIONS \
+  -sTRACE_WEBGL_CALLS \
+  -lGL \
+  -sALLOW_TABLE_GROWTH \
+  -sRETAIN_COMPILER_SETTINGS \
+  -sDEFAULT_LIBRARY_FUNCS_TO_INCLUDE="['\$getWasmTableEntry','emscripten_webgl_create_context','emscripten_webgl_make_context_current','emscripten_webgl_destroy_context','emscripten_webgl_get_current_context']" \
   -gsource-map \
   --source-map-base "http://127.0.0.1:8000/$WASM_BUILD_DIR/" \
   -g \
